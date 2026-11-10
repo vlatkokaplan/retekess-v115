@@ -57,7 +57,7 @@ class NorModel:
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--prior',type=Path,help='also model the reviewed RC3 migration from a local image')
+    p.add_argument('--prior',type=Path,help='also model a reviewed prior-release migration from a local image')
     args=p.parse_args()
     root=ROOT/'build';root.mkdir(exist_ok=True)
     source=args.source.read_bytes();release,_=build(source)

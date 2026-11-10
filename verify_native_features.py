@@ -80,13 +80,14 @@ def shim():
     a.L('read')
     a.cjne_ai(0x3E, 'write')
     a.movar(2)
-    a.cjne_ai(4, 'bad_read')
+    a.cjne_ai(1, 'bad_read')
     bump(0x7001)
     a.movdptr(0x7F00)
     a.movar(1)
     a.movda(0x82)
-    for reg in (2, 3, 4, 5):
-        a.emit(0xE0, 0xF8 + reg, 0xA3)
+    a.emit(0xE0,0xFA)
+    # Bytes beyond the first are unavailable from the stock NACKing reader.
+    for reg in (3,4,5):a.movri(reg,255)
     a.ret()
     a.L('bad_read')
     error(1)
@@ -534,7 +535,7 @@ def check(case, result):
     if logs[4]!=want['tunes']:raise ValueError(f'scanner tune count mismatch: {case}, {logs.hex()}, {want}')
     if logs[5]!=(len(case.get('messages',[0])) if case.get('draw_hook') and not (case.get('task',3)==3 and case.get('scan',0)==0 and case.get('mode',1) in (1,2,3)) else 0):
         raise ValueError(f'native draw fallback mismatch: {case}, {logs.hex()}')
-    if logs[1]!=want['frames']*2 or logs[3]!=want['frames']*4+want['popups']:
+    if logs[1]!=want['frames']*8 or logs[3]!=want['frames']*4+want['popups']:
         raise ValueError(f'display/tuner traffic while asleep or render count mismatch: {case}: {logs.hex()}, {want}')
     if result[size+32:size+40] != bytes([0x22,0x23,0x24,0x25,0x26,0x27,0x77,0x8F]):
         raise ValueError(f'CPU context mismatch: {case}: {result[size+32:size+40].hex()}')
@@ -619,6 +620,13 @@ def all_cases(smoke=False):
              dict(mode=2,flags=1,dirty=1,freq=999,regs=regs),
              dict(mode=3,flags=1,dirty=1,freq=30000,regs=regs)]
     if not smoke:
+        # Distinct AM/FM C/N and poisoned unused return bytes catch the RC4
+        # burst-read error across home, numeric meter, graph and scanner UI.
+        for mode in (1,2,3):
+            for flags in (0,1,1|n.GRAPH,n.MENU):
+                r=regs.copy();r[22]=6;r[23]=0x80|19
+                cases.append(dict(mode=mode,flags=flags,dirty=1,regs=r))
+            cases.append(dict(mode=mode,flags=n.MENU,msg=0x9E,dirty=1,regs=r))
         cases += [dict(msg=msg,flags=flags,mode=mode) for msg in range(256)
                   for flags in (0,1,2,3) for mode in (1,2,3)]
         cases += [dict(msg=msg,mode=mode,lock=lock,scan=scan,task=task,flags=1)
@@ -723,6 +731,7 @@ def main():
                   checks=['key dispatch and guards','all 256 bandwidth/mono/bass/de-emphasis register values',
                           'all 256 clock values unchanged; quiet gating removed',
                           'native bank-call arguments, register preservation and stack balance',
+                          'single-register tuner reads; unavailable return bytes poisoned',
                           'signed signal/offset arithmetic and framebuffer pixels',
                           'LCD buffer and allocated state boundary sentinels',
                           'LCD sleep/wake commands, refresh suppression and backlight restoration',

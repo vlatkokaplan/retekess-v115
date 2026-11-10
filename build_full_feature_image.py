@@ -85,7 +85,7 @@ def sector_plan(original, candidate, sector_size=4096):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--output',type=Path,default=ROOT/'build/v115-full-features-rc4.bin')
+    p.add_argument('--output',type=Path,default=ROOT/'build/v115-full-features-rc5.bin')
     args=p.parse_args()
     targets=[args.output,args.output.with_suffix('.manifest.json'),args.output.with_suffix('.decoded.bin')]
     if any(t.exists() for t in targets):

@@ -1,9 +1,9 @@
-"""Minimum complete verification evidence required for the RC4 writer."""
-NATIVE_CASES=8636
+"""Minimum complete verification evidence required for the release writer."""
+NATIVE_CASES=8651
 LCD_GUARD_CASES=2048
 PREFERENCE_CASES=1488
 GRAPH_HISTORY_CASES=10
 GRAPH_PIXEL_CASES=28
 RADIO_UI_CASES=320
-SCAN_STATE_CASES=465
+SCAN_STATE_CASES=471
 SCAN_PIXEL_CASES=80

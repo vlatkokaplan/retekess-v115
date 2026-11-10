@@ -1,6 +1,6 @@
 PYTHON ?= python3
 SOURCE ?= stock.bin
-IMAGE ?= build/v115-full-features-rc4.bin
+IMAGE ?= build/v115-full-features-rc5.bin
 
 .PHONY: references build verify smoke clean
 

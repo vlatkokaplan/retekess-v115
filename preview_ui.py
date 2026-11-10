@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview RC4 screens on the physical LCD from volatile loader RAM.
+"""Preview radio screens on the physical LCD from volatile loader RAM.
 
 Uses deterministic demonstration values, not live RF measurements. Each page
 pair is CRC-checked in RAM before transfer. No flash write command is sent.

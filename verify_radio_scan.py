@@ -43,7 +43,7 @@ def execute(case):
                 n.write(a,n.STATE+n.ACTION,0);a.movri(1,op['key']);a.emit(0x12,0x60,0x06)
             else:
                 n.write(a,0x3AAC,op.get('tick',0))
-                for addr,value in [(0x7F14,(0x40 if op.get('complete',True) else 0)|(0x20 if op.get('tuned',True) else 0)),
+                for addr,value in [(0x7F14,op.get('raw_status',(0x40 if op.get('complete',True) else 0)|(0x20 if op.get('tuned',True) else 0))),
                                    (0x7F15,0),(0x7F16,op.get('cn',14)),(0x7F17,op.get('cn',14))]:n.write(a,addr,value)
                 a.emit(0x12,0x60,0x03)
         copy_xram(a,n.STATE,0x9000+index*132,n.STATE_SIZE,'state'+str(index))
@@ -55,9 +55,10 @@ def execute(case):
     shim=Asm(0x5000)
     shim.cjne_ai(0x1D,'bad');shim.movad(0x82);shim.cjne_ai(0x8B,'read')
     shim.movar(6);n.jnz(shim,'bad');n.read(shim,0x7001);shim.emit(0x04);shim.movxda();shim.ret()
-    shim.L('read');shim.cjne_ai(0x3E,'bad');shim.movar(1);shim.cjne_ai(20,'bad');shim.movar(2);shim.cjne_ai(4,'bad')
-    n.read(shim,0x7002);shim.emit(0x04);shim.movxda();shim.movdptr(0x7F14)
-    for reg in (2,3,4,5):shim.emit(0xE0,0xF8+reg,0xA3)
+    shim.L('read');shim.cjne_ai(0x3E,'bad');shim.movar(2);shim.cjne_ai(1,'bad')
+    n.read(shim,0x7002);shim.emit(0x04);shim.movxda();shim.movdptr(0x7F00)
+    shim.movar(1);shim.movda(0x82);shim.emit(0xE0,0xFA)
+    for reg in (3,4,5):shim.movri(reg,255)
     shim.ret();shim.L('bad');n.write(shim,0x7000,1);shim.ret()
     output=run([(a.base,a.assemble()),(0x6000,scan_control(0x6000)[0]),(0x5000,shim.assemble()),
                 (0x133,bytes.fromhex('02 50 00')),(0x100,b'\x22')],a.base,stop,0x9000,len(ops)*132+1)
@@ -121,14 +122,19 @@ def model(case):
                         settle=max(0,settle-elapsed);wait=max(0,wait-elapsed)
                         if not wait:
                             reads+=1
-                            if not op.get('complete',True):
+                            if op.get('raw_status')==255:advance()
+                            elif not op.get('complete',True):
                                 if not settle:advance()
                                 else:wait=1
                             elif not op.get('tuned',True):advance()
                             else:
-                                cn=op.get('cn',14)&127
-                                if cn<THRESHOLDS[threshold]:advance()
-                                else:status=3;remaining=DWELL_TICKS[dwell]
+                                reads+=1
+                                raw=op.get('cn',14)
+                                if raw==255:advance()
+                                else:
+                                    cn=raw&127
+                                    if cn<THRESHOLDS[threshold]:advance()
+                                    else:status=3;remaining=DWELL_TICKS[dwell]
         result.append(dict(freq=freq,status=status,low=low,high=high,step=step,tick=tick,wait=wait,settle=settle,
                            remaining=remaining,cn=cn,tunes=tunes,reads=reads,threshold=threshold,dwell=dwell,
                            direction=direction,range=kind,nv=dirty_nv,flags=flags))
@@ -175,6 +181,9 @@ def main():
     for threshold in range(4):
         for cn in (0,3,4,7,8,11,12,15,16,127):cases.append(dict(threshold=threshold,ops=[{'key':0x9B},{'tick':2,'cn':cn}]))
     for dwell in range(3):cases.append(dict(dwell=dwell,ops=[{'key':0x9B},{'tick':2}]+[{'tick':k%10} for k in range(3,104)]))
+    for mode in (1,2,3):
+        for invalid in ({'raw_status':255},{'cn':255}):
+            cases.append(dict(mode=mode,ops=[{'key':0x9B},dict(tick=2,**invalid)]))
     for guard in ({'task':2},{'mode':3},{'submode':1}):
         cases.append(dict(ops=[{'key':0x9B},dict(tick=2,**guard),{'key':0x9C}]))
     cases += [dict(ops=[{'key':0x9B}]+[{'tick':k%10,'complete':False} for k in range(1,24)]),
@@ -195,7 +204,8 @@ def main():
                 pixel_cases+=1
     report=dict(state_machine_cases_passed=len(cases),scanner_pixel_cases_passed=pixel_cases,
                 station_list_writes=0,bounds_and_grid_verified=True,stc_lock_and_cn_required=True,
-                dwell_pause_resume_and_timeout_verified=True,
+                dwell_pause_resume_and_timeout_verified=True,single_register_reads_verified=True,
+                all_ones_bus_reads_rejected=True,
                 source_sha256={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in
                                ('radio_scan.py','verify_radio_scan.py','emulation.py')})
     if args.candidate:args.report=args.candidate.with_suffix('.scan-emulation.json')

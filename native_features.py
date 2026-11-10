@@ -23,7 +23,7 @@ METRICS = 8  # registers 20..27
 REG7, FREQ = 16, 17
 CN, RF, RFGAIN, IFGAIN, VOLTAGE = 19, 20, 21, 22, 23
 CURSOR = 25
-VERSION = '1.5-RC4'
+VERSION = '1.5-RC5'
 SETTINGS_BANK, MENU_BANK = 0x32, 0x31
 PREF_REG, TIMEOUT, IDLE, NV_DIRTY = 32, 33, 34, 35
 PREF_RECORD, SAVE_TICKS, AUTO_DUE, ACTION = 37, 120, 121, 122
@@ -72,6 +72,13 @@ def write(a, addr, value):
     a.movdptr(addr)
     a.movai(value)
     a.movxda()
+
+
+def read_tuner_register(a, register):
+    # Stock 1d:1d3e sends a NACK after every byte (1d78 -> 1aab).
+    # Only the first returned byte is valid: request one register per call.
+    a.movri(1,register);a.movri(2,1)
+    farcall(a,0x1D,0x1D3E)
 
 
 def save_context(a):
@@ -403,16 +410,9 @@ def control(base=0x1800, state=STATE):
     a.pop(0x83);a.pop(0x82);a.pop(0xE0);bank_return()
 
     a.L('sample')
-    # The stock reader returns up to four bytes in R2..R5. Never request >4.
-    for reg, field in ((20, METRICS), (24, METRICS + 4)):
-        a.movri(1, reg)
-        a.movri(2, 4)
-        farcall(a, 0x1D, 0x1D3E)
-        a.movdptr(state + field)
-        for source in (2, 3, 4, 5):
-            a.movar(source)
-            a.movxda()
-            a.emit(0xA3)
+    for reg in range(20,28):
+        read_tuner_register(a,reg)
+        a.movdptr(state+METRICS+reg-20);a.movar(2);a.movxda()
     a.movri(0, 0x18)
     a.emit(0xE6)
     a.movdptr(state + MODE)
