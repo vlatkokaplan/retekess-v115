@@ -23,7 +23,7 @@ METRICS = 8  # registers 20..27
 REG7, FREQ = 16, 17
 CN, RF, RFGAIN, IFGAIN, VOLTAGE = 19, 20, 21, 22, 23
 CURSOR = 25
-VERSION = '1.5-RC5'
+VERSION = '1.5-RC6'
 SETTINGS_BANK, MENU_BANK = 0x32, 0x31
 PREF_REG, TIMEOUT, IDLE, NV_DIRTY = 32, 33, 34, 35
 PREF_RECORD, SAVE_TICKS, AUTO_DUE, ACTION = 37, 120, 121, 122
@@ -195,6 +195,7 @@ def control(base=0x1800, state=STATE):
 
     a.L('release_ui')
     put(SCAN_STATUS,0)
+    a.L('yield_native')
     get(UI_ACTIVE);a.jz('release_ui_done')
     put(UI_ACTIVE,0);write(a,0x3CD1,1)
     a.L('release_ui_done');a.ret()
@@ -205,6 +206,8 @@ def control(base=0x1800, state=STATE):
     a.cjne_ai(3, 'unsafe')
     read(a, 0x3CD0)
     jnz(a, 'unsafe')
+    read(a,0x3CF7)  # native numeric/preset prompt countdown
+    jnz(a,'unsafe')
     a.movri(0, 0x18)
     a.emit(0xE6)
     a.jz('unsafe')
@@ -404,6 +407,14 @@ def control(base=0x1800, state=STATE):
     a.L('consume_dirty');put(26,0)
     a.L('mark_dirty');dirty()
     a.L('message_done')
+    # Native frequency/volume dialogs run inside the stock key handler and
+    # may block there while drawing. Yield before dispatch, not on its return.
+    get(26);a.jz('message_restore')
+    a.cjne_ai(0xF8,'yield_not_half_tick');a.sjmp('message_restore')
+    a.L('yield_not_half_tick');a.cjne_ai(0xFE,'yield_message');a.sjmp('message_restore')
+    a.L('yield_message')
+    a.lcall('yield_native');dirty()
+    a.L('message_restore')
     restore_context(a)
     a.push(0xE0);a.push(0x82);a.push(0x83)
     read(a,state+26);a.emit(0xF9)

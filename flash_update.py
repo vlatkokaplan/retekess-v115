@@ -27,7 +27,9 @@ KNOWN_PRIOR_IMAGES={
     '90d1da53c06b84c259c78c2da05a2dab333fa66b11a72cff37f9ffc18f5f1ed7':
     dict(version='1.5-RC3',welcome_sha256='69b8fd06bb363cf0e6ada3f468dcb64366b8f6d0ba6974f5fab7703c199df1bf'),
     'db1e3a4d2d437fc3192b43db457d244f6bd2f3349f13ceac180e689e4f20f0c0':
-    dict(version='1.5-RC4',welcome_sha256='425cdafa622adb977d803db8abbaae83a15664d7398bdc7aa4a2353fda03bdc3')
+    dict(version='1.5-RC4',welcome_sha256='425cdafa622adb977d803db8abbaae83a15664d7398bdc7aa4a2353fda03bdc3'),
+    '783a211af66d7aa4febc9aa28397c2f4dc3744dc6e5fd2865a2f67d66f0afba7':
+    dict(version='1.5-RC5',welcome_sha256='daf01e05b97a208a92e8fbda8444220c6b9f7822f52aab8b35957e54ef5b117e')
 }
 DATASHEET='https://www.zbitsemi.com/upload/file/20200901/20200901155301_74863.pdf'
 
@@ -223,7 +225,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--baseline',type=Path,required=True,help='fresh full backup with matching .verify.bin')
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--image',type=Path,default=ROOT/'build/v115-full-features-rc5.bin')
+    p.add_argument('--image',type=Path,default=ROOT/'build/v115-full-features-rc6.bin')
     p.add_argument('--session',type=Path,required=True,help='new local directory for backup, plan and journal')
     p.add_argument('--write',action='store_true',help='program flash; otherwise prepare offline only')
     args=p.parse_args()

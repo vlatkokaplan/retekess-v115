@@ -1,5 +1,5 @@
 """Minimum complete verification evidence required for the release writer."""
-NATIVE_CASES=8651
+NATIVE_CASES=8678
 LCD_GUARD_CASES=2048
 PREFERENCE_CASES=1488
 GRAPH_HISTORY_CASES=10

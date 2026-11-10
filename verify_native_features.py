@@ -170,6 +170,14 @@ def shim():
     a.movri(1, 0)
     a.ret()
     a.L('stock_key')
+    # A modal dialog draws synchronously here, before the outer wait hook.
+    # Any forwarded key/system event must already have released ownership.
+    a.movar(1);a.jz('stock_key_ready')
+    a.cjne_ai(0xF8,'stock_not_half_tick');a.sjmp('stock_key_ready')
+    a.L('stock_not_half_tick');a.cjne_ai(0xFE,'stock_check_owner');a.sjmp('stock_key_ready')
+    a.L('stock_check_owner')
+    n.read(a,n.STATE+n.UI_ACTIVE);a.jz('stock_key_ready');error(6)
+    a.L('stock_key_ready')
     a.movdptr(0x7006)
     a.movar(1)
     a.movxda()
@@ -210,7 +218,7 @@ def expected(case):
     writes=frames=popups=saves=0;commands=[];output=0
     count=case.get('bl_count',45);level=case.get('bl_level',0)
     saved_count=case.get('saved_bl_count',45);saved_level=case.get('saved_bl_level',0)
-    safe=task==3 and scan==0 and mode in (1,2,3)
+    safe=task==3 and scan==0 and not case.get('entry_wait',0) and mode in (1,2,3)
     messages=case.get('messages',[case.get('msg',0)])
     def release(msg):return msg&0xE0 in (0x80,0xC0)
     def commit():
@@ -318,6 +326,7 @@ def expected(case):
                 if before!=reg7:
                     pref=reg7&63;nv_dirty=1;save_ticks=0
         if handled:output=0;dirty=1
+        elif output not in (0,0xF8,0xFE):dirty=1
         if flags&2 and not safe:
             flags&=0xF0;commands += [0x2F,0xAF];dirty=1
             count,level=saved_count,saved_level
@@ -438,6 +447,7 @@ def run_batch(cases, candidate=None):
         for reg in [7,*range(20,28)]:
             n.write(a, 0x7F00 + reg, regs[reg])
         for addr, value in [(n.STATE+n.FLAGS, case.get('flags', 0)),
+                            (n.STATE+n.UI_ACTIVE,case.get('owned',0)),
                             (n.STATE+n.DIRTY, case.get('dirty', 0)),
                             (n.STATE+n.PREF_REG,case.get('pref_reg',stored[3] if loaded else regs[7]&63)),
                             (n.STATE+n.TIMEOUT,case.get('timeout',stored[4] if loaded else 0)),
@@ -450,6 +460,7 @@ def run_batch(cases, candidate=None):
                             (n.STATE+n.BL_LEVEL,case.get('saved_bl_level',0)),
                             (0x3B71,case.get('bl_count',45)),(0x3B72,1),
                             (0x3AB8, case.get('task', 3)), (0x3CD0, case.get('scan', 0)),
+                            (0x3CF7,case.get('entry_wait',0)),
                             (0x3B3A, regs[7]), (0x3CDC, case.get('freq', 953) & 255),
                             (0x3CDD, case.get('freq', 953) >> 8),
                             (0x27FF, 0xA5), (0x2900, 0xB6),
@@ -533,7 +544,7 @@ def check(case, result):
     if logs[9]!=want['bl_count'] or logs[11]!=want['bl_level']:
         raise ValueError(f'backlight state mismatch: {case}: {logs.hex()}, {want}')
     if logs[4]!=want['tunes']:raise ValueError(f'scanner tune count mismatch: {case}, {logs.hex()}, {want}')
-    if logs[5]!=(len(case.get('messages',[0])) if case.get('draw_hook') and not (case.get('task',3)==3 and case.get('scan',0)==0 and case.get('mode',1) in (1,2,3)) else 0):
+    if logs[5]!=(len(case.get('messages',[0])) if case.get('draw_hook') and not (case.get('task',3)==3 and case.get('scan',0)==0 and not case.get('entry_wait',0) and case.get('mode',1) in (1,2,3)) else 0):
         raise ValueError(f'native draw fallback mismatch: {case}, {logs.hex()}')
     if logs[1]!=want['frames']*8 or logs[3]!=want['frames']*4+want['popups']:
         raise ValueError(f'display/tuner traffic while asleep or render count mismatch: {case}: {logs.hex()}, {want}')
@@ -620,6 +631,12 @@ def all_cases(smoke=False):
              dict(mode=2,flags=1,dirty=1,freq=999,regs=regs),
              dict(mode=3,flags=1,dirty=1,freq=30000,regs=regs)]
     if not smoke:
+        cases += [dict(mode=mode,owned=1,messages=messages)
+                  for mode in (1,2,3) for messages in
+                  ([0x57,0x97],[0xBB],[0x89,0xE8,0xE9],[0x97,0x9F,0x99],[0xBB,0x97,0x9B])]
+        cases += [dict(mode=mode,entry_wait=wait,owned=1,timeout=1,idle=9,
+                       flags=flags,draw_hook=True,messages=[0xFE,n.LONG_BW,0x97])
+                  for mode in (1,2,3) for wait in (1,6) for flags in (0,n.MENU)]
         # Distinct AM/FM C/N and poisoned unused return bytes catch the RC4
         # burst-read error across home, numeric meter, graph and scanner UI.
         for mode in (1,2,3):
@@ -741,6 +758,7 @@ def main():
                           'native settings ABI, legacy migration and bounded sixteen-byte save/readback',
                           'deferred shortcut saving, unchanged preferences skip writes, automatic sleep boundaries',
                           'large home screen, graph switching, native draw ownership and fallback',
+                          'LCD ownership released before blocking native frequency and volume dialogs',
                           'scanner menu transitions, pause/resume, sleep and saved scan options'],
                   scope='Actual new instructions run at relocated bank addresses; native I2C/LCD/message services are instrumented. Full stock runtime and RF hardware are not emulated.')
     if candidate_raw is not None:

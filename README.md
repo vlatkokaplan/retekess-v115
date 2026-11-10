@@ -4,7 +4,7 @@ Expanded tuning, signal history, configurable scanning, saved preferences, and
 screen sleep for the Retekess V115. This project patches a verified stock v1.4 image and
 assembles the added 8051 code directly in Python.
 
-**Current version: 1.5-RC5 · Linux development tools · 2 MiB SPI flash**
+**Current version: 1.5-RC6 · Linux development tools · 2 MiB SPI flash**
 
 ![Radio screen, C/N history, and scanning controls](assets/ui-preview.png)
 
@@ -29,15 +29,13 @@ assembles the added 8051 code directly in Python.
   screen sleep after 10, 30, or 60 seconds, or Off.
 - **Versioned startup:** firmware version and build date on the welcome screen.
 
-RC5 fixes the constant **127 dB** C/N reading in RC4. The stock tuner helper
-NACKs after its first byte, so multi-register requests returned `0xFF` for later
-registers. Signal measurements now use separate single-register requests. A live
-RAM test reproduced the failure and measured 4–5 dB at 95.0 MHz versus about
-10 dB at 95.3 MHz with the corrected protocol. The scanner uses the same fix and
-rejects all-ones status/C/N reads. RC5 passed the full release suite and was flashed
-with two matching full-image readbacks, preserving the boot area, settings, and
-station lists. Normal-boot acceptance of RC5 is pending; the RC4 screens were
-exercised on the physical LCD from RAM.
+RC6 fixes hidden native frequency-entry and volume dialogs. Custom LCD ownership
+is released before forwarding keys, and native numeric/preset prompts finish
+before the custom view resumes. Screen sleep pauses during these prompts.
+RC5's single-register tuner-read fix is retained. RC6 passed the full release
+suite and was flashed with two matching full-image readbacks, preserving the boot
+area, settings, and station lists. Normal-boot frequency-entry/volume acceptance
+is pending. Instruction tests use instrumented board services.
 
 ## On the radio
 
@@ -59,8 +57,11 @@ Use these shortcuts during idle radio playback with the keypad unlocked.
 | **7** | Toggle FM bass boost |
 | **8** | Open settings |
 
-Stock **hold 5** retains its numeric-entry behavior. Normal short-digit entry
-is retained outside the custom screens.
+Type digits from the main radio screen to open the original frequency editor:
+**9 → 5 → 3 → Play/Pause** tunes FM 95.3 MHz. The custom screen resumes when
+the editor closes. **Hold 5 / MEMO** opens station storage, rather than frequency
+entry, as described in the [radio manual](https://v3.retekess.com/Assets/resource/Radio/V115-EN%2CDE%2CFR%2CES%2CIT.pdf).
+Exit diagnostics or settings before direct frequency entry.
 
 Inside **settings**, use:
 
@@ -138,7 +139,7 @@ run the fetcher without `--firmware` and pass `SOURCE=/path/to/stock.bin` to
 `make build` and `make verify`. The executable and CRC-table prefix must match
 the researched stock v1.4 layout; individual saved settings may differ.
 
-The output is `build/v115-full-features-rc5.bin`, a complete scrambled SPI
+The output is `build/v115-full-features-rc6.bin`, a complete scrambled SPI
 image, with a manifest, validation reports, decoded analysis image, and boot
 preview alongside it. **Program the `.bin` image, not `.decoded.bin`.**
 Builds are deterministic. Existing image outputs are not overwritten; use
@@ -146,7 +147,7 @@ Builds are deterministic. Existing image outputs are not overwritten; use
 
 `make smoke` runs a quick display check. `make verify` runs the full suite:
 
-- 8,651 native instruction cases and 2,048 stock LCD guard/ownership cases.
+- 8,678 native instruction cases and 2,048 stock LCD guard/ownership cases.
 - 1,488 cold-start preference cases, including RC3 migration and invalid records.
 - 10 signal-history sequences, 28 graph pixel cases, and 320 home/menu pixel cases.
 - 471 scanner state-machine cases and 80 scanner pixel cases.
@@ -178,18 +179,18 @@ the tested **Zbit `5e4015`** flash profile: 2 MiB capacity, 4 KiB sectors, and
 
    ```sh
    python3 flash_update.py --baseline local/radio.bin --source stock.bin \
-     --image build/v115-full-features-rc5.bin --session local/plan
+     --image build/v115-full-features-rc6.bin --session local/plan
    ```
 
 5. To program, use a new session directory and add `--write`:
 
    ```sh
    python3 flash_update.py --baseline local/radio.bin --source stock.bin \
-     --image build/v115-full-features-rc5.bin --session local/flash --write
+     --image build/v115-full-features-rc6.bin --session local/flash --write
    ```
 
 The writer accepts supported stock firmware, this exact release, and the reviewed
-RC3/RC4 executables. Before upgrading either release, run the migration model
+RC3/RC4/RC5 executables. Before upgrading a prior release, run the migration model
 against your fresh local backup (or the exact prior-release image):
 
 ```sh
@@ -207,8 +208,9 @@ folders retain the original image, target, plan, and recovery journal.
 
 Keep your verified original backup outside the checkout and have SPI recovery
 available. After verification finishes, disconnect USB and restart normally
-without holding **1**. For an RC5 acceptance check, open settings, select **10S**,
+without holding **1**. For an RC6 acceptance check, open settings, select **10S**,
 save with **0**, test sleep/wake, then restart and check that the preference remains.
+Type a frequency, check its confirmation/cancel behavior, and open volume control.
 Also test **hold 2 → 7** for the graph and **hold 8 → 8** for a short scan.
 `python3 preview_ui.py --all` checks all four new screens from loader RAM with
 demonstration values and does not program flash.
@@ -223,7 +225,7 @@ demonstration values and does not program flash.
 | Display | ST7565-compatible 128×64 LCD; SPI/DMA updates are suppressed while asleep and native draws yield to custom views |
 | Protection | CRC balancing in unused application padding keeps boot/header sectors unchanged |
 
-The current additions use 14,353 bytes of code, font, and strings. Nine
+The current additions use 14,384 bytes of code, font, and strings. Nine
 wholly empty 2 KiB application banks remain (18 KiB), plus padding in occupied banks.
 History and scanner state use 128 bytes in the checked common-RAM tail; the
 stock audio buffer is not borrowed.
@@ -239,6 +241,42 @@ All project documentation is in this README. Firmware dumps, downloaded SDKs,
 flash sessions, captures, old builds, and device-specific records are excluded
 from version control. `extract_images.py` can inspect image resources in a
 local firmware file without adding them to the repository.
+
+
+## AKC register research
+
+Addresses below are hexadecimal: decimal register 10 is **0x0A**, not 0x10.
+The published AKC6955 V2.3 register map identifies 0x0A and 0x0E–0x13 as reserved
+or internal test fields. The six latter defaults are `40 82 CC FD 80 80`.
+The [Chinese manufacturer datasheet](https://xn--p8jqu4215bemxd.com/wp-content/uploads/2019/08/dsp6955.pdf)
+and [PU2CLR driver documentation](https://github.com/pu2clr/AKC695X#registers-setup)
+do not provide a usable description of their individual bits.
+
+| Field | What is established |
+| --- | --- |
+| 0x07 bit 7 | Datasheet calls it a measurement bit and recommends zero in normal use; V115 stock initializes it to one. Its effect needs a controlled comparison. |
+| 0x0D bit 7 | V115 tuning code sets this reserved bit before triggering tuning. Its function is unknown. |
+| 0x0F bit 2 | V115 initializes 0x0F to 0x86 rather than the listed 0x82 default. Its function is unknown. |
+| `wtmode` | Mentioned in the tuning-indicator description, with no mode-selection procedure found. |
+| 0x07 bits 3:2 | Documented automatic stereo, forced mono, or forced stereo when a pilot is present. |
+| 0x08 | Documented station C/N, frequency-offset, and stereo thresholds. |
+| 0x0B bits 5:4 | Documented FM seek steps: 25/50/100/200 kHz. |
+| 0x0D bits 3:2 | Documented output pre-gain: 0/3.5/7/10.5 dB. |
+
+The documented fields above come from the
+[manufacturer register descriptions](https://www.maximradio.altervista.org/akc6955/AKC6955-datasheet-english.pdf#page=13).
+The V115-specific observations come from its stock initialization and tuning
+instructions; they establish which bits are used, without identifying their
+internal purpose. Other drivers checked include
+[chinese-xiaoge](https://github.com/chinese-xiaoge/AKC6955/blob/master/akc6955.h)
+and [ads830e](https://github.com/ads830e/Radio-Akc6955/blob/master/SRC/radio_akc6955/user/AKC6955.c).
+
+No verified undocumented NFM, SSB, or IQ-output mode was found in these sources.
+TV1/TV2 are documented analog-TV audio bands using FM demodulation. Finer FM
+manual tuning is a plausible future improvement, but requires changing the
+V115's 100 kHz frequency representation as well as its display and input paths;
+changing the seek-step register alone does not provide it. Reserved fields keep
+the stock initialization and tuning behavior in this release.
 
 ## References
 
