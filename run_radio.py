@@ -55,7 +55,7 @@ def select(t,manifest,name):
 def state(t,manifest):
     raw=t.read_ram(manifest['state_address'],512)[:manifest['state_bytes']]
     if raw[:4]!=b'V115':raise RuntimeError('application state signature missing')
-    words={'frequency','entry','frames','events','tunes','read_channel'}
+    words={'frequency','entry','frames','events','tunes','read_channel','clock_ticks'}
     result={name:int.from_bytes(raw[offset:offset+(2 if name in words else 1)],'little')
             for name,offset in manifest['fields'].items() if name not in ('size','page_crc')}
     result['page_crc']=list(raw[manifest['fields']['page_crc']:manifest['fields']['page_crc']+8])
@@ -81,7 +81,7 @@ def main():
     a=p.parse_args()
     if not 0<a.seconds<=3600:p.error('seconds must be in 0..3600')
     manifest=json.loads((a.build/'radio.json').read_text());code=(a.build/'radio.bin').read_bytes()
-    if manifest.get('simulation') or hashlib.sha256(code).hexdigest()!=manifest['sha256']:
+    if manifest.get('simulation') or manifest.get('autonomous') or hashlib.sha256(code).hexdigest()!=manifest['sha256']:
         p.error('real, unmodified application build required')
     for name,digest in manifest['source_sha256'].items():
         if hashlib.sha256((ROOT/name).read_bytes()).hexdigest()!=digest:p.error('build source changed: '+name)

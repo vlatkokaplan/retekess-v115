@@ -4,6 +4,7 @@
 #define X8(a) (*(volatile __xdata u8 *)(a))
 __sfr __at(0x90) P1;
 __sfr __at(0xA0) P2;
+__sbit __at(0xA2) POWER_SWITCH;
 __sfr __at(0xB0) P3;
 __sfr __at(0xBA) P0DIR;
 __sfr __at(0xBB) P1DIR;
@@ -104,7 +105,7 @@ void hardware_init(void) {
     P3&=0xEF;
     for(i=0;i<sizeof(commands);++i) lcd_byte(commands[i]);
     /* Key ladders are ADC channel 1/P0.6 and channel 5/P1.3. */
-    P0DIR|=0x40; P1DIR|=8; P3DIR|=8;
+    P0DIR|=0x40; P1DIR|=8; P3DIR|=8; P2DIR|=4;
     /* Loader strap sensing leaves P0.6's 10k pull-up enabled. It shifts digits. */
     X8(0x7825)&=0xBF; X8(0x7841)&=0xF7;
     PCON2&=0xFE; ADCMODE=0; X8(0x7880)=23;
@@ -121,6 +122,7 @@ u8 hardware_key(void) {
     static const __code u8 first[]={0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,8,0};
     static const __code u8 second[]={1,3,0x11,5,4,0x0A,0x0C,0x16,2,9,0x12};
     u8 i;
+    if(POWER_SWITCH) return KEY_POWER;
     radio.adc1=adc(1); radio.adc2=adc(5);
     if(radio.adc1<0xE2) { for(i=0;i<10;++i) if(radio.adc1<bounds[i]) return first[i]; }
     if(radio.adc2<0xF8) { for(i=0;i<11;++i) if(radio.adc2<bounds[i]) return second[i]; }
@@ -142,4 +144,8 @@ void hardware_audio(void) {
     audio_write(2,0); audio_write(0,1);
     audio_write(5,6); audio_write(4,0); audio_write(3,0);
     P3&=0xDF;
+}
+void hardware_amplifier(u8 enabled) {
+    X8(0x7809)&=0xF7; P3DIR&=0xDF;
+    if(enabled) P3&=0xDF; else P3|=0x20;
 }

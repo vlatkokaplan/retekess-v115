@@ -5,6 +5,7 @@
 #define SHOWN ((__xdata u8 *)0x8400)
 #define KEY (*(volatile __xdata u8 *)0x7040)
 #define FAULT (*(volatile __xdata u8 *)0x7041)
+#define BOOT_KEY (*(volatile __xdata u8 *)0x7042)
 
 u8 tuner_read(u8 reg) { return FAULT==1?255:REG[reg]; }
 void tuner_write(u8 reg,u8 value) {
@@ -18,8 +19,9 @@ void tuner_write(u8 reg,u8 value) {
         REG[20]=0x60|(REG[2]&31); REG[21]=channel;
     }
 }
-void hardware_init(void) { KEY=0; FAULT=0; REG[20]=0; REG[21]=0; REG[22]=7; REG[23]=0x80|18; }
+void hardware_init(void) { KEY=BOOT_KEY; FAULT=0; REG[20]=0; REG[21]=0; REG[22]=7; REG[23]=0x80|18; }
 void hardware_audio(void) {}
+void hardware_amplifier(u8 enabled) { REG[31]=enabled; }
 u8 hardware_key(void) { radio.adc1=255; radio.adc2=255; return KEY; }
 void lcd_power(u8 on) { REG[30]=on; }
 void lcd_page(u8 row) {

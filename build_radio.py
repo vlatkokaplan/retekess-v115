@@ -35,40 +35,55 @@ def read_hex(path):
     return memory
 
 
-def build(output,simulation=False):
+def build(output,simulation=False,autonomous=False,timer_batch=False):
+    if timer_batch and not autonomous:raise ValueError('timer batches require the autonomous application')
+    code_start,code_end=(0x4000,0x5800) if autonomous and not timer_batch else (CODE_START,CODE_END)
+    scratch,state_address,page_address=(0x1780,0x17B0,0x2800) if autonomous and not timer_batch else (0x2280,0x2380,0x2300)
+    scratch_limit=48 if scratch==0x1780 else 128
     output.mkdir(parents=True,exist_ok=True)
-    font=(ROOT/'assets/font-5x8.bin').read_bytes()
+    # The fixed radio UI uses ASCII space through underscore (uppercase only).
+    font=(ROOT/'assets/font-5x8.bin').read_bytes()[:64*5]
+    if len(font)!=64*5:raise ValueError('radio font is incomplete')
     (output/'font.h').write_text('static const __code u8 font[]={'+','.join(str(v) for v in font)+'};\n')
     compiler=tool('sdcc');linker=tool('sdld')
     sources=[ROOT/'firmware/app.c',ROOT/('firmware/sim_hardware.c' if simulation else 'firmware/hardware.c')]
+    if autonomous and not timer_batch:sources.append(ROOT/'firmware/standalone.c')
+    defines=[f'-DRADIO_STATE={state_address}',f'-DRADIO_PAGE={page_address}']
+    if autonomous:defines.append('-DRADIO_AUTONOMOUS')
+    if autonomous and not timer_batch:defines.append('-DRADIO_NATIVE_AUDIO')
     objects=[]
     for source in sources:
         obj=output/(source.stem+'.rel');objects.append(obj)
         subprocess.run([compiler,'-c','-mmcs51','--model-large','--std-c99','--opt-code-size',
-                        '-I'+str(ROOT/'firmware'),'-I'+str(output),str(source),'-o',str(obj)],check=True)
+                        *defines,'-I'+str(ROOT/'firmware'),'-I'+str(output),str(source),'-o',str(obj)],check=True)
     stem=output/'radio'
-    subprocess.run([linker,'-n','-i','-m','-w','-b','CSEG=0x2400','-b','XSEG=0x2280',
+    subprocess.run([linker,'-n','-i','-m','-w','-b',f'CSEG={code_start:#x}','-b',f'XSEG={scratch:#x}',
                     str(stem),*[str(p) for p in objects]],check=True)
     mapping=stem.with_suffix('.map').read_text()
     symbols={name:int(address,16) for address,name in re.findall(r'^\s*(?:C:)?\s*([0-9A-Fa-f]{8})\s+(\w+)\b',mapping,re.M)}
-    for area,limit in [('l_DSEG',32),('l_BSEG',0),('l_OSEG',0),('l_ISEG',0),('l_PSEG',0),('l_XSEG',128)]:
+    for area,limit in [('l_DSEG',32),('l_BSEG',0),('l_OSEG',0),('l_ISEG',0),('l_PSEG',0),('l_XSEG',scratch_limit)]:
         if symbols.get(area,0)>limit:raise ValueError(f'{area} exceeds reserved RAM: {symbols.get(area)} > {limit}')
     memory=read_hex(stem.with_suffix('.ihx'))
-    if not memory or min(memory)<CODE_START or max(memory)>=CODE_END:
+    if not memory or min(memory)<code_start or max(memory)>=code_end:
         raise ValueError(f'executable exceeds loader RAM: {min(memory):#x}..{max(memory):#x}')
-    code=bytes(memory.get(p,0) for p in range(CODE_START,max(memory)+1))
+    code=bytes(memory.get(p,0) for p in range(code_start,max(memory)+1))
     stem.with_suffix('.bin').write_bytes(code)
-    entries={name:symbols['_'+name] for name in ['app_init','app_tick','app_stop']}
+    entries={name:symbols['_'+name] for name in ['app_init','app_tick']}
+    if not autonomous:entries['app_stop']=symbols['_app_stop']
+    if autonomous and not timer_batch:
+        entries['radio_forever']=symbols['_radio_forever']
+        entries['radio_timer_start']=symbols['_radio_timer_start']
     names=['size','mode','volume','frequency','entry','digits','editing','sleeping','muted','error',
-           'cn','status','adc1','adc2','last_key','injected_key','command','frames','events','tunes','page_crc','pending','entry_bad','read_channel']
+           'cn','status','adc1','adc2','last_key','injected_key','command','frames','events','tunes','page_crc','pending','entry_bad','read_channel','standby','clock_ticks']
     fields={name:memory[symbols['_app_layout']+i] for i,name in enumerate(names)}
-    report=dict(version='OPEN-0.1',format='RAM executable; not an SPI flash image',
-                code_address=CODE_START,code_bytes=len(code),code_end=CODE_START+len(code),
+    report=dict(version='OPEN-0.2.2' if autonomous else 'OPEN-0.1',format='RAM executable; not an SPI flash image',
+                autonomous=autonomous,timer_batch=timer_batch,
+                code_address=code_start,code_bytes=len(code),code_end=code_start+len(code),
                 tick_milliseconds=int(re.search(r'#define TICK_MS (\d+)',(ROOT/'firmware/radio.h').read_text())[1]),
-                state_address=0x2380,state_bytes=fields['size'],fields=fields,
+                state_address=state_address,state_bytes=fields['size'],fields=fields,
                 internal_data_bytes=symbols.get('l_DSEG',8),
-                scratch_address=0x2280,scratch_bytes=symbols.get('l_XSEG',0),
-                page_buffer_address=0x2300,entries=entries,simulation=simulation,
+                scratch_address=scratch,scratch_bytes=symbols.get('l_XSEG',0),
+                page_buffer_address=page_address,entries=entries,simulation=simulation,
                 sha256=hashlib.sha256(code).hexdigest(),
                 compiler=subprocess.check_output([compiler,'--version'],text=True).splitlines()[0],
                 source_sha256={str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -81,7 +96,9 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,default=ROOT/'build/radio-ram')
     p.add_argument('--simulation',action='store_true')
-    a=p.parse_args();r=build(a.output.resolve(),a.simulation)
+    p.add_argument('--autonomous',action='store_true',help='build the autonomous radio overlay')
+    p.add_argument('--timer-batch',action='store_true',help='build the autonomous UI for bounded tests in loader RAM')
+    a=p.parse_args();r=build(a.output.resolve(),a.simulation,a.autonomous,a.timer_batch)
     print(json.dumps(r,indent=2))
 
 

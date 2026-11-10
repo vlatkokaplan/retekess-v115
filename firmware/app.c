@@ -11,10 +11,11 @@ const __code u8 app_layout[]={sizeof(struct Radio),offsetof(struct Radio,mode),o
     offsetof(struct Radio,adc1),offsetof(struct Radio,adc2),offsetof(struct Radio,last_key),
     offsetof(struct Radio,injected_key),offsetof(struct Radio,command),offsetof(struct Radio,frames),
     offsetof(struct Radio,events),offsetof(struct Radio,tunes),offsetof(struct Radio,page_crc),
-    offsetof(struct Radio,pending),offsetof(struct Radio,entry_bad),offsetof(struct Radio,read_channel)};
+    offsetof(struct Radio,pending),offsetof(struct Radio,entry_bad),offsetof(struct Radio,read_channel),
+    offsetof(struct Radio,standby),offsetof(struct Radio,reserved)};
 
-__xdata __at(0x2380) struct Radio radio;
-__xdata __at(0x2300) u8 page[128];
+__xdata __at(RADIO_STATE) struct Radio radio;
+__xdata __at(RADIO_PAGE) u8 page[128];
 
 static u8 cursor;
 static u8 rem;
@@ -29,7 +30,7 @@ static u16 divide(u16 value,u8 by) {
 static void clear(void) { u8 i; for(i=0;i<128;++i) page[i]=0; cursor=0; }
 static void character(u8 c) {
     u8 column; u16 offset;
-    if(c<32 || c>126 || cursor>122) return;
+    if(c<32 || c>95 || cursor>122) return;
     offset=(u16)(c-32); offset=(offset<<2)+offset;
     for(column=0;column<5;++column) page[cursor++]=font[offset+column];
     ++cursor;
@@ -48,7 +49,7 @@ static void draw(void) {
     for(row=0;row<8;++row) {
         clear();
         switch(row) {
-        case 0: text("RETEKESS OPEN 0.1"); break;
+        case 0: text(RADIO_LABEL); break;
         case 1: text(radio.mode==FM?"FM":radio.mode==MW?"MW":"SW");
             text(radio.sleeping?" SLEEP":" RADIO"); break;
         case 2:
@@ -71,7 +72,7 @@ static void draw(void) {
             else if(radio.error) text("HARDWARE ERROR");
             else text(radio.editing?"PLAY OK  DEL BACK":"FM/AM  SW  +/- TUNE"); break;
         case 6: text("0-9 FREQ  PLAY MUTE"); break;
-        case 7: text("MENU LCD  POWER EXIT"); break;
+        case 7: text(RADIO_POWER_HINT); break;
         }
         lcd_page(row);
     }
@@ -110,6 +111,17 @@ static void tune(void) {
 static void key(u8 k) {
     u16 next;
     ++radio.events; radio.last_key=k; radio.dirty=1;
+#ifdef RADIO_AUTONOMOUS
+    if(radio.standby) {
+        if(k!=KEY_POWER) return;
+        radio.standby=0; radio.sleeping=0; radio.repeat=255;
+        lcd_power(1); tune(); hardware_amplifier(1); return;
+    }
+    if(k==KEY_POWER) {
+        radio.standby=1; radio.sleeping=1; radio.pending=0; radio.editing=0;
+        hardware_amplifier(0); tuner_write(0,(radio.mode==FM?0x44:4)); lcd_power(0); return;
+    }
+#endif
     if(radio.sleeping) { radio.sleeping=0; radio.repeat=255; lcd_power(1); radio.dirty=1; return; }
     if(k>=0x16 && k<=0x1F) {
         if(!radio.editing) { radio.entry=0; radio.digits=0; radio.entry_bad=0; radio.editing=1; radio.error&=0xEF; }
@@ -129,7 +141,7 @@ static void key(u8 k) {
                 radio.frequency=next; radio.editing=0; tune();
             } else radio.error|=ERR_TUNE;
         } else { radio.muted^=1; tuner_write(0,(radio.mode==FM?0xE8:0xA8)|((radio.muted||radio.pending)?4:0)); }
-    } else if(k==0x0C) {
+    } else if(k==KEY_DELETE) {
         if(radio.entry_bad) { radio.entry_bad=0; --radio.digits; radio.error&=0xEF; }
         else if(radio.editing && radio.digits) { radio.entry=divide(radio.entry,10); --radio.digits; }
         else radio.editing=0;
@@ -145,8 +157,8 @@ static void key(u8 k) {
         if(k==9 && radio.volume<43) ++radio.volume;
         if(k==8 && radio.volume>24) --radio.volume;
         tuner_write(6,radio.volume<<2);
-    } else if(k==0x0A) { if(radio.editing) { radio.editing=0; radio.error&=0xEF; } else { radio.sleeping=1; lcd_power(0); } }
-    else if(k==5) { radio.command=1; }
+    } else if(k==KEY_MENU) { if(radio.editing) { radio.editing=0; radio.error&=0xEF; } else { radio.sleeping=1; lcd_power(0); } }
+    else if(k==KEY_POWER) { radio.command=1; }
     radio.dirty=1;
 }
 void app_init(void) {
@@ -157,7 +169,13 @@ void app_init(void) {
     radio.magic[0]='V'; radio.magic[1]='1'; radio.magic[2]='1'; radio.magic[3]='5';
     radio.version=1; radio.volume=35; radio.reg7=0xA1;
     radio.frequency=3812; radio.band_frequency[0]=3812; radio.band_frequency[1]=999; radio.band_frequency[2]=6000;
-    hardware_init(); hardware_audio();
+    hardware_init();
+#ifdef RADIO_NATIVE_AUDIO
+    /* The established boot path already selected this board's speaker route. */
+    hardware_amplifier(0);
+#else
+    hardware_audio();
+#endif
     for(i=0;i<20;++i) tuner_write(i,initial[i]);
     tune(); draw();
 }
@@ -176,13 +194,19 @@ void app_tick(void) {
             if(++radio.repeat>=25) { radio.repeat=17; key(k); }
         }
     }
+    if(radio.standby) return;
     if(radio.pending) {
         if(radio.settle<=145) metrics();
         if(radio.settle<=145 && (radio.status&0x40) && radio.read_channel==radio.target_channel) {
             radio.pending=0; tuner_write(0,(radio.mode==FM?0xE8:0xA8)|(radio.muted?4:0)); radio.dirty=1;
+#ifdef RADIO_NATIVE_AUDIO
+            hardware_amplifier(1);
+#endif
         } else if(!--radio.settle) { radio.pending=0; radio.error|=ERR_TUNE; radio.dirty=1; }
     }
     if(++radio.ticks>=25) { radio.ticks=0; metrics(); radio.dirty=1; }
     if(radio.dirty && !radio.sleeping) draw();
 }
+#ifndef RADIO_AUTONOMOUS
 void app_stop(void) { tuner_write(0,(radio.mode==FM?0xEC:0xAC)); lcd_power(1); }
+#endif
