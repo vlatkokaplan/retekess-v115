@@ -15,6 +15,8 @@ from boot_version import OFFSET,SIZE
 
 CODE_END=TABLE+COUNT*2
 KNOWN_OPEN={
+    'aeedaafcee51c41ed19d6a7f37d36dd661560a75167a5d00cff2d8289c2bcd1f':
+        '61a1d1ac05265f35e2860f52895b22da895cd7d0680b0da49d91b82b8506abba',
     # Reviewed OPEN-0.2 boot candidate; its two-block load is fixed in 0.2.1.
     '04da1aab91a79531e53747f17ed04091ca0032b4cee294b6a6fa22a823e792fa':
         '8123cf7839a8824c412a110a0b97972a31ee9de963ad63064a072179bbfd5524',
@@ -52,7 +54,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--baseline',type=Path,required=True)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--image',type=Path,default=ROOT/'build/v115-open-0.2.2.bin')
+    p.add_argument('--image',type=Path,default=ROOT/'build/v115-open-0.2.3.bin')
     p.add_argument('--session',type=Path,required=True)
     p.add_argument('--restore-rc6',action='store_true',help='restore reproducible RC6 code while retaining current settings')
     p.add_argument('--write',action='store_true')
@@ -62,6 +64,7 @@ def main():
     if not a.restore_rc6:
         validation=json.loads(a.image.with_suffix('.validation.json').read_text())
         if (validation.get('candidate_sha256')!=sha(release) or validation.get('application_cases')!=55 or
+                validation.get('amplifier_gpio_cases')!=4 or
                 not validation.get('boot_entry_checked') or not validation.get('timer_configuration_checked') or
                 not validation.get('overlay_load_length_checked') or validation.get('boot_key_cases')!=2 or
                 not validation.get('normal_update_and_recovery_model_passed')):

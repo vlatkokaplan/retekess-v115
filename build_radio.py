@@ -76,7 +76,7 @@ def build(output,simulation=False,autonomous=False,timer_batch=False):
     names=['size','mode','volume','frequency','entry','digits','editing','sleeping','muted','error',
            'cn','status','adc1','adc2','last_key','injected_key','command','frames','events','tunes','page_crc','pending','entry_bad','read_channel','standby','clock_ticks']
     fields={name:memory[symbols['_app_layout']+i] for i,name in enumerate(names)}
-    report=dict(version='OPEN-0.2.2' if autonomous else 'OPEN-0.1',format='RAM executable; not an SPI flash image',
+    report=dict(version='OPEN-0.2.3' if autonomous else 'OPEN-0.1',format='RAM executable; not an SPI flash image',
                 autonomous=autonomous,timer_batch=timer_batch,
                 code_address=code_start,code_bytes=len(code),code_end=code_start+len(code),
                 tick_milliseconds=int(re.search(r'#define TICK_MS (\d+)',(ROOT/'firmware/radio.h').read_text())[1]),

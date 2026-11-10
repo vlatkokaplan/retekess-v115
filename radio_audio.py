@@ -124,7 +124,7 @@ def initialize(transport):
 
     # Keep the amplifier muted while the DAC establishes its bias and trims.
     access(('xmodify', 0x7809, 0xF7, 0), ('smodify', 0xBD, 0xDF, 0),
-           ('smodify', 0xB0, 255, 0x20), ('xmodify', 0x7891, 255, 0x80),
+           ('smodify', 0xB0, 0xDF, 0), ('xmodify', 0x7891, 255, 0x80),
            ('xwrite', 0x7892, 0xC0), ('xwrite', 0x7890, 0xF8),
            ('smodify', 0xDC, 0x3F, 0x80), ('smodify', 0x9C, 0x7F, 0))
     at((0, 1), (8, 255), (9, 127), (10, 255), (11, 127), (6, 15), (7, 1))

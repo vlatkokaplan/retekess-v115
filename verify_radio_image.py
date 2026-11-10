@@ -85,7 +85,7 @@ def boot_key_checks():
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--candidate',type=Path,default=ROOT/'build/v115-open-0.2.2.bin')
+    p.add_argument('--candidate',type=Path,default=ROOT/'build/v115-open-0.2.3.bin')
     p.add_argument('--baseline',type=Path,required=True)
     p.add_argument('--application-report',type=Path,default=ROOT/'build/radio-autonomous-sim/validation.json')
     p.add_argument('--hardware-report',type=Path)
@@ -94,6 +94,7 @@ def main():
     compiled=meta['compiled'];code=(ROOT/'build/radio-audit-rebuild/radio.bin').read_bytes()
     application=json.loads(a.application_report.read_text())
     assert application['autonomous'] and application['cases_passed']==55 and application['hardware_sha256']==compiled['sha256']
+    assert application['amplifier_gpio_cases_passed']==4
     for name,digest in application['source_sha256'].items():assert sha((ROOT/name).read_bytes())==digest,('application source changed',name)
     check(candidate);plain=decode(candidate);original=decode(source)
     assert plain[OVERLAY:OVERLAY+len(code)]==code
@@ -144,14 +145,18 @@ def main():
         hardware=json.loads(a.hardware_report.read_text())
         timer_build=compile_radio(ROOT/'build/radio-timer-audit',autonomous=True,timer_batch=True)
         assert hardware['completed'] and not hardware['host_paces_ticks'] and hardware['application_sha256']==timer_build['sha256']
+        assert hardware['audio_source_sha256']==sha((ROOT/'radio_audio.py').read_bytes())
+        assert hardware['speaker_muted_on_exit']
         assert len(hardware['batches'])>=2
         assert all(sample['clock_ticks']==(i+1)*256 and sample['error']==0 and 4.8<=sample['seconds']<=8
                    for i,sample in enumerate(hardware['batches']))
         native=True
     paths=[*compiled['source_sha256'], 'build_radio_image.py','verify_radio.py','verify_radio_image.py',
-           'flash_radio.py','flash_update.py','spi_flash.py','usb_dump.py','loader_packets.py','firmware_integrity.py','boot_version.py']
+           'flash_radio.py','flash_update.py','spi_flash.py','usb_dump.py','loader_packets.py','firmware_integrity.py','boot_version.py',
+           'radio_audio.py','radio_timer.py','preview_radio_timer.py']
     report=dict(version=VERSION,candidate_sha256=sha(candidate),compiled_sha256=compiled['sha256'],
-                baseline_sha256=sha(baseline),application_cases=55,boot_entry_checked=True,timer_configuration_checked=True,timer_configuration_cases=16,
+                baseline_sha256=sha(baseline),application_cases=55,amplifier_gpio_cases=4,
+                boot_entry_checked=True,timer_configuration_checked=True,timer_configuration_cases=16,
                 overlay_load_length_checked=True,boot_key_cases=2,
                 normal_update_and_recovery_model_passed=True,partial_program_rollback_pages=completed[1:],
                 unsafe_images_rejected=True,rc6_restore_model_passed=True,

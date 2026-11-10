@@ -24,7 +24,7 @@ typedef unsigned int u16;
 #define RADIO_PAGE 0x2300
 #endif
 #ifdef RADIO_AUTONOMOUS
-#define RADIO_LABEL "RETEKESS OPEN 0.2.2"
+#define RADIO_LABEL "RETEKESS OPEN 0.2.3"
 #define RADIO_POWER_HINT "MENU LCD  POWER STBY"
 #else
 #define RADIO_LABEL "RETEKESS OPEN 0.1"

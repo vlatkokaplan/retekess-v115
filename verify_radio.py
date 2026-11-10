@@ -20,7 +20,7 @@ def frame(state,autonomous=False):
     if state['editing']:value='ENTRY TOO LARGE' if state['entry_bad'] else f"ENTER {state['entry']}_"
     hint=('TUNER READ ERROR' if state['error']&1 else 'CHECK FREQUENCY' if state['error']&16 else
           'HARDWARE ERROR' if state['error'] else 'PLAY OK  DEL BACK' if state['editing'] else 'FM/AM  SW  +/- TUNE')
-    lines=['RETEKESS OPEN '+('0.2.2' if autonomous else '0.1'),['FM','MW','SW'][mode]+(' SLEEP' if state['sleeping'] else ' RADIO'),value,
+    lines=['RETEKESS OPEN '+('0.2.3' if autonomous else '0.1'),['FM','MW','SW'][mode]+(' SLEEP' if state['sleeping'] else ' RADIO'),value,
            'C/N '+('--' if state['cn']==255 else str(state['cn']))+' DB '+('TUNING' if state['pending'] else 'LOCK' if state['status']&32 else '----'),
            f"VOL {state['volume']-24} "+('MUTED' if state['muted'] else 'SOUND'),hint,
            '0-9 FREQ  PLAY MUTE','MENU LCD  POWER '+('STBY' if autonomous else 'EXIT')]
@@ -119,6 +119,21 @@ def board_init_checks(output,autonomous=False):
         wrapped=wrapped.replace(call,call+bytes.fromhex('e5 82 90 b0 00 f0'))
         got=run([(manifest['code_address'],code),(a.base,a.assemble()),(0x6000,wrapped)],a.base,stop,0xB000,2)
         assert got==bytes([want,error]),('physical POWER input and bounded ADC fallback',pin,got.hex())
+    amp_entry=int(re.search(r'C:\s+([0-9A-F]+)\s+_hardware_amplifier\s',mapping)[1],16)
+    for initial in (0,255):
+        for enabled in (0,1):
+            a=Asm(0xA000);a.movdi(0x81,0x8F);a.movdi(0x86,0)
+            a.movdi(0xB0,initial);a.movdi(0xBD,initial)
+            a.movdptr(0x7809);a.movai(initial);a.movxda()
+            a.movdi(0x82,enabled);a.emit(0x12,0x60,0)
+            a.movdptr(0xB000)
+            for reg in (0xB0,0xBD):a.movad(reg);a.movxda();a.emit(0xA3)
+            a.movdptr(0x7809);a.emit(0xE0);a.movdptr(0xB002);a.movxda()
+            stop=a.base+len(a.code);a.emit(0x80,0xFE)
+            got=run([(manifest['code_address'],code),(a.base,a.assemble()),
+                     (0x6000,wrapper(amp_entry,manifest['internal_data_bytes'],0x6000))],a.base,stop,0xB000,3)
+            expected=bytes([(initial&0xDF)|(enabled<<5),initial&0xDF,initial&0xF7])
+            assert got==expected,('active-high speaker enable preserves unrelated pins',initial,enabled,got.hex())
     return manifest['sha256']
 
 
@@ -168,7 +183,7 @@ def main():
         ([dict(ticks=6),dict(fault=1,inject=3),dict(ticks=150)],
          dict(frequency=3813,pending=0,error=17,cn=255)),
         ([dict(inject=KEY_MENU),dict(held=9,ticks=35)],
-         dict(sleeping=0,volume=35,events=2)),
+         dict(sleeping=0,volume=27,events=2)),
         ([dict(inject=0x12)]+digits(30000)[:-1]+[dict(inject=0x16),dict(inject=KEY_DELETE),dict(inject=2)],
          dict(mode=2,frequency=30000,editing=0,error=0)),
         ([dict(held=0x17),dict(held=0),dict(held=0x17,ticks=2)],dict(entry=1,events=1)),
@@ -186,10 +201,10 @@ def main():
     if a.autonomous:
         cases.extend([
             ([dict(ticks=6),dict(inject=KEY_POWER)],dict(standby=1,sleeping=1,pending=0)),
-            ([dict(inject=KEY_POWER),dict(inject=9),dict(inject=0x17)],dict(standby=1,volume=35,editing=0)),
+            ([dict(inject=KEY_POWER),dict(inject=9),dict(inject=0x17)],dict(standby=1,volume=27,editing=0)),
             ([dict(inject=KEY_POWER),dict(inject=KEY_POWER),dict(ticks=6)],dict(standby=0,sleeping=0,pending=0)),
             ([dict(inject=4),dict(inject=3),dict(inject=9),dict(inject=2),dict(inject=KEY_POWER),dict(inject=KEY_POWER),dict(ticks=6)],
-             dict(mode=1,frequency=1008,volume=36,muted=1,standby=0,pending=0)),
+             dict(mode=1,frequency=1008,volume=28,muted=1,standby=0,pending=0)),
             ([dict(held=KEY_POWER,ticks=40)],dict(standby=1,events=1)),
             ([dict(held=KEY_POWER,ticks=40),dict(held=0,ticks=2),dict(held=KEY_POWER,ticks=10)],dict(standby=0,events=2,pending=0)),
             ([dict(inject=KEY_MENU),dict(inject=KEY_POWER)],dict(standby=1,sleeping=1)),
@@ -203,11 +218,13 @@ def main():
             assert actual==got['frequency'],('channel conversion',got,actual)
         if got['pending'] or got['error']&16 and not got['editing']:
             assert tuner[0]&4,('unsettled or failed tune must remain muted',got,tuner.hex())
+            assert tuner[31]==0,('unsettled or failed tune must disable speaker',got,tuner.hex())
         if got['standby']:assert tuner[0]&0x84==4 and tuner[30]==0 and tuner[31]==0,('standby power',got,tuner.hex())
+        elif not got['pending'] and not got['error']:assert tuner[31]==1,('settled tune enables speaker',got,tuner.hex())
     hardware_sha=board_init_checks(a.output/'hardware',a.autonomous)
     audio_start_checks()
     report=dict(cases_passed=len(cases),version=manifest['version'],autonomous=a.autonomous,board_initialization_cases_passed=3,power_gpio_cases_passed=2,
-                loader_pullups_cleared=True,lcd_timeout_bounded=True,hardware_sha256=hardware_sha,
+                amplifier_gpio_cases_passed=4,loader_pullups_cleared=True,lcd_timeout_bounded=True,hardware_sha256=hardware_sha,
                 audio_start_context_preserved=True,audio_transfer_timeout_bounded=True,
                 audio_source_sha256=hashlib.sha256(Path(radio_audio.__file__).read_bytes()).hexdigest(),
                 cpu_context_preserved=True,frame_pixels_verified=True,

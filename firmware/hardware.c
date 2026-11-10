@@ -137,15 +137,16 @@ static void audio_write(u8 reg,u8 value) {
 }
 void hardware_audio(void) {
     /* Observed headphone analogue route. Cold-start playback needs listening validation. */
-    X8(0x7809)&=0xF7; P3DIR&=0xDF; P3|=0x20;
+    X8(0x7809)&=0xF7; P3DIR&=0xDF; P3&=0xDF;
     CLKCON1=(CLKCON1&0x3F)|0x80; PCON1&=0x7D; PCON3&=0xDB;
     X8(0x7890)=0xFE; X8(0x7891)=0x11; X8(0x7892)=0xE8;
     X8(0x7893)=0xFF; X8(0x7894)=0x0D; X8(0x7895)=0x10;
     audio_write(2,0); audio_write(0,1);
     audio_write(5,6); audio_write(4,0); audio_write(3,0);
-    P3&=0xDF;
+    /* The speaker stays disabled until the requested tuner channel settles. */
 }
 void hardware_amplifier(u8 enabled) {
     X8(0x7809)&=0xF7; P3DIR&=0xDF;
-    if(enabled) P3&=0xDF; else P3|=0x20;
+    /* V115 speaker enable is active high, confirmed by a live RAM comparison. */
+    if(enabled) P3|=0x20; else P3&=0xDF;
 }

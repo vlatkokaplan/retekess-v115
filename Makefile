@@ -1,7 +1,7 @@
 PYTHON ?= python3
 SOURCE ?= stock.bin
 IMAGE ?= build/v115-full-features-rc6.bin
-OPEN_IMAGE ?= build/v115-open-0.2.2.bin
+OPEN_IMAGE ?= build/v115-open-0.2.3.bin
 BASELINE ?= local/radio.bin
 
 .PHONY: references build verify smoke clean radio-build radio-verify radio-run radio-image radio-autonomous-verify radio-timer-build radio-timer-run radio-image-verify

@@ -93,6 +93,7 @@ static void tune(void) {
     u16 channel;
     u8 config, reg2;
     if(radio.frequency<low() || radio.frequency>high()) { radio.error|=ERR_TUNE; return; }
+    hardware_amplifier(0);
     radio.error&=0xEF;
     radio.band_frequency[radio.mode]=radio.frequency;
     config=radio.mode==FM?0xC4:0x84;
@@ -115,7 +116,7 @@ static void key(u8 k) {
     if(radio.standby) {
         if(k!=KEY_POWER) return;
         radio.standby=0; radio.sleeping=0; radio.repeat=255;
-        lcd_power(1); tune(); hardware_amplifier(1); return;
+        lcd_power(1); tune(); return;
     }
     if(k==KEY_POWER) {
         radio.standby=1; radio.sleeping=1; radio.pending=0; radio.editing=0;
@@ -167,7 +168,7 @@ void app_init(void) {
     u8 i;
     for(i=0;i<sizeof(radio);++i) ((__xdata u8 *)&radio)[i]=0;
     radio.magic[0]='V'; radio.magic[1]='1'; radio.magic[2]='1'; radio.magic[3]='5';
-    radio.version=1; radio.volume=35; radio.reg7=0xA1;
+    radio.version=1; radio.volume=27; radio.reg7=0xA1;
     radio.frequency=3812; radio.band_frequency[0]=3812; radio.band_frequency[1]=999; radio.band_frequency[2]=6000;
     hardware_init();
 #ifdef RADIO_NATIVE_AUDIO
@@ -199,14 +200,12 @@ void app_tick(void) {
         if(radio.settle<=145) metrics();
         if(radio.settle<=145 && (radio.status&0x40) && radio.read_channel==radio.target_channel) {
             radio.pending=0; tuner_write(0,(radio.mode==FM?0xE8:0xA8)|(radio.muted?4:0)); radio.dirty=1;
-#ifdef RADIO_NATIVE_AUDIO
             hardware_amplifier(1);
-#endif
         } else if(!--radio.settle) { radio.pending=0; radio.error|=ERR_TUNE; radio.dirty=1; }
     }
     if(++radio.ticks>=25) { radio.ticks=0; metrics(); radio.dirty=1; }
     if(radio.dirty && !radio.sleeping) draw();
 }
 #ifndef RADIO_AUTONOMOUS
-void app_stop(void) { tuner_write(0,(radio.mode==FM?0xEC:0xAC)); lcd_power(1); }
+void app_stop(void) { hardware_amplifier(0); tuner_write(0,(radio.mode==FM?0xEC:0xAC)); lcd_power(1); }
 #endif

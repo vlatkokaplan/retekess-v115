@@ -4,7 +4,7 @@ Expanded tuning, signal history, configurable scanning, saved preferences, and
 screen sleep for the Retekess V115. This project patches a verified stock v1.4 image and
 assembles the added 8051 code directly in Python.
 
-**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.2.2 (experimental)**
+**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.2.3 (experimental)**
 
 Linux development tools · 2 MiB SPI flash. The two images have separate build
 and installation commands; OPEN is a radio application with fewer features.
@@ -42,7 +42,7 @@ is pending. Instruction tests use instrumented board services.
 
 ## Autonomous source-built radio
 
-**OPEN-0.2.2** adds an autonomous main loop to the working OPEN-0.1 RAM prototype.
+**OPEN-0.2.3** adds an autonomous main loop to the working OPEN-0.1 RAM prototype.
 The image retains the established bootstrap and initial clock/DAC setup, then
 starts the C radio regardless of the previous task or inserted memory card.
 The loader copies all three 2 KiB blocks of the radio program. The startup
@@ -52,19 +52,21 @@ Its own Timer1 polls the keypad and runs the radio at 20 ms intervals; a
 normal startup. The radio program occupies about **5.6 KiB** of the existing
 6 KiB overlay. The timer follows the existing clock divider so audio keeps
 its startup clock configuration; the normal-boot build also retains the
-board’s established DAC route.
+board’s established DAC route. OPEN-0.2.3 corrects the active-high speaker
+enable: the amplifier stays off during startup, retuning, and standby, and
+turns on after the requested tuner channel settles.
 
 **POWER** enters standby: tuner off, amplifier muted, display and backlight off.
 Press **POWER** again to resume the same frequency, band, volume, and mute
 setting. The CPU keeps polling in standby; this is not deep power-off.
 **MENU** still cancels entry or sleeps only the display, with any key waking it.
-Cold startup currently selects FM 95.300 MHz at volume 11. Settings survive
+Cold startup currently selects FM 95.300 MHz at volume 3. Settings survive
 standby in RAM, but OPEN does not yet save them across battery removal.
 
 The source-built radio does not include RC6 scanning, graphs, presets,
 recording, or USB media playback. Existing saved settings and station lists
 are retained in flash for restoring RC6. All other keys follow the prototype
-table below, except that POWER controls standby in OPEN-0.2.2. POWER is a
+table below, except that POWER controls standby in OPEN-0.2.3. POWER is a
 separate GPIO input; MENU is on the second ADC ladder. REC and MODE currently
 have no action. DEL uses the stock ladder code and passes simulated editing
 tests, but physical DEL presses have not registered on the test radio.
@@ -84,7 +86,8 @@ make radio-timer-run
 
 This uses the smaller, verified loader RAM allocation and executes 256 native
 timer ticks per USB call, about 5.12 seconds. The host reads state between
-batches. Directly loading the full radio overlay while USB is active stalls
+batches and mutes the speaker when the test ends, as key polling stops then.
+Directly loading the full radio overlay while USB is active stalls
 this loader during key refresh, so that memory is reserved for normal boot.
 
 After a fresh matching double-read backup, audit and prepare the update:
@@ -92,24 +95,26 @@ After a fresh matching double-read backup, audit and prepare the update:
 ```sh
 make radio-image-verify BASELINE=local/radio.bin
 python3 flash_radio.py --baseline local/radio.bin \
-  --image build/v115-open-0.2.2.bin --session local/open-plan
+  --image build/v115-open-0.2.3.bin --session local/open-plan
 ```
 
 To install, use a new session directory and add `--write`. The writer accepts
-verified stock, RC6, reviewed OPEN-0.2/0.2.1, or this exact reproducible OPEN
+verified stock, RC6, reviewed OPEN-0.2 through 0.2.2, or this exact OPEN
 image. It uses the existing sector writer, erase/program/restore trial,
-rollback journal, and two complete
-installed-image readbacks. The first 8 KiB and current settings are protected.
-Boot-entry, 16 timer configurations, 55 application cases, invalid-image
-guards, interrupted writes, oversized erases, and restoration to RC6 are
-checked before writing.
+rollback journal, and two complete installed-image readbacks. The first 8 KiB
+and current settings are protected.
+Boot-entry, 16 timer configurations, 55 application cases, four amplifier GPIO
+cases, invalid-image guards, interrupted writes, oversized erases, and
+restoration to RC6 are checked before writing.
 
 After installation, disconnect USB and restart normally without holding 1.
-Check the OPEN-0.2.2 screen, direct frequency entry, standby/wake, and audio.
-OPEN-0.2.1 has confirmed battery startup, frequency entry, and headphone audio.
-OPEN-0.2.2 corrects the physical POWER/MENU mapping and preserves native audio
-routing. It was installed with two matching full-image readbacks; its battery,
-standby, and speaker listening checks are pending.
+Check the OPEN-0.2.3 screen, direct frequency entry, standby/wake, and audio.
+OPEN-0.2.2 has confirmed battery startup, frequency entry, headphone audio,
+and physical POWER standby/wake. A RAM comparison confirmed speaker station
+audio with the amplifier enable high. OPEN-0.2.3 applies that fix and starts
+at volume 3. Installation passed two matching full-image readbacks; normal-boot
+speaker audio is confirmed, while volume currently changes the display without
+changing loudness. Volume control is under investigation.
 
 To restore RC6, first make a new matching double-read backup of the installed
 OPEN image, build RC6 with `make build`, then use:
@@ -184,15 +189,18 @@ Instruction tests execute the compiled application with simulated board
 services, checking exact screen pixels, frequency boundaries and overflow,
 debouncing, mute/sleep, stale status, timeouts, and loader context preservation.
 There are 48 application cases, three cases executing the real GPIO
-initialization, two POWER GPIO cases, and a DAC startup context/timeout check. The GPIO tests cover
-clearing loader-enabled key pull-ups while preserving other pins; the LCD test
+initialization, two POWER GPIO cases, four amplifier GPIO cases, and a DAC
+startup context/timeout check. The GPIO tests cover clearing loader-enabled
+key pull-ups while preserving other pins; the LCD test
 checks that an absent SPI completion flag returns an error within its limit.
 Live USB tests have verified FM/MW/SW channel readback. The display, physical
 frequency entry, controls, and headphone station audio have been confirmed on
-the radio. Speaker audio remains unverified for this RAM build. Presets,
-scanning, persistent settings, recording, USB playback, and autonomous startup
-are outside this prototype; the OPEN-0.2.2 image above adds autonomous startup. The RC6 features and controls below apply
-to the separately installed patched firmware.
+the radio. Speaker station audio was confirmed by a live GPIO comparison.
+Presets, scanning, persistent settings, recording, USB playback, and autonomous
+startup are outside this prototype; the OPEN-0.2.3 image above adds autonomous
+startup.
+The RC6 features and controls below apply to the separately installed patched
+firmware.
 
 ## On the radio
 

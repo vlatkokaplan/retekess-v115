@@ -32,7 +32,8 @@ def main():
         stop=True
     old=signal.signal(signal.SIGINT,interrupted)
     t=RawTransport();saved=None
-    report=dict(flash_written=False,host_paces_ticks=False,application_sha256=m['sha256'],batches=[])
+    report=dict(flash_written=False,host_paces_ticks=False,application_sha256=m['sha256'],
+                audio_source_sha256=hashlib.sha256(Path(radio_audio.__file__).read_bytes()).hexdigest(),batches=[])
     try:
         report['loader_before']=t.identify();t.unlock()
         report['audio_initialization']=radio_audio.initialize(t)
@@ -57,9 +58,17 @@ def main():
         report['error']=str(exc);raise
     finally:
         try:
-            if saved is not None:
-                upload(t,0x2200,radio_timer.configuration(saved).ljust(512,b'\0'));execute(t)
-            report['loader_after']=t.identify()
+            try:
+                # Key polling stops with the batch: do not leave an uncontrolled speaker playing.
+                code,size=radio_audio.program([('smodify',0xBD,0xDF,0),('smodify',0xB0,0xDF,0)])
+                upload(t,radio_audio.BASE,code.ljust(512,b'\0'));execute(t)
+                values=t.read_ram(radio_audio.RESULT,512)[:size]
+                if values[1]&0x20:raise RuntimeError('speaker did not mute after the RAM test')
+                report['speaker_muted_on_exit']=True
+            finally:
+                if saved is not None:
+                    upload(t,0x2200,radio_timer.configuration(saved).ljust(512,b'\0'));execute(t)
+                report['loader_after']=t.identify()
         finally:
             t.close();signal.signal(signal.SIGINT,old)
             a.report.parent.mkdir(parents=True,exist_ok=True);a.report.write_text(json.dumps(report,indent=2)+'\n')

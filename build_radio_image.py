@@ -12,7 +12,7 @@ from firmware_integrity import check,finalize,preserve_original,balance_applicat
 from lcd_draw import Asm
 import boot_version
 
-VERSION='OPEN-0.2.2'
+VERSION='OPEN-0.2.3'
 OVERLAY,OVERLAY_SIZE=0x1D800,0x1800
 HANDOFF=0xEA0A
 LOAD_COUNT=0xE9F8
@@ -69,7 +69,7 @@ def build(source,output):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--output',type=Path,default=ROOT/'build/v115-open-0.2.2.bin')
+    p.add_argument('--output',type=Path,default=ROOT/'build/v115-open-0.2.3.bin')
     a=p.parse_args()
     if a.output.exists():p.error('refusing to overwrite an existing image')
     raw,manifest=build(a.source.read_bytes(),a.output.parent/'radio-autonomous')
