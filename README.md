@@ -1,12 +1,12 @@
 # Retekess V115 Custom Firmware
 
-Expanded tuning, a settings menu, saved FM preferences, and proper screen sleep
-for the Retekess V115. This project patches a verified stock v1.4 image and
+Expanded tuning, signal history, configurable scanning, saved preferences, and
+screen sleep for the Retekess V115. This project patches a verified stock v1.4 image and
 assembles the added 8051 code directly in Python.
 
-**Current version: 1.5-RC3 · Linux development tools · 2 MiB SPI flash**
+**Current version: 1.5-RC4 · Linux development tools · 2 MiB SPI flash**
 
-![Settings and shortcut help on the V115 display](assets/ui-preview.png)
+![RC4 radio screen, C/N history, and scanning controls](assets/ui-preview.png)
 
 ## Features
 
@@ -14,6 +14,13 @@ assembles the added 8051 code directly in Python.
   MW 9/10 kHz bands are retained.
 - **FM controls:** 200/150/100/50 kHz bandwidth, automatic stereo or forced
   mono, bass boost, and 50/75 µs de-emphasis.
+- **Clearer interface:** a large frequency readout, a relative C/N bar, and
+  separate FM/AM settings pages.
+- **Signal graph:** 32 one-second C/N samples, peak hold, and a fixed 0–60 dB
+  scale. History resets on frequency/band changes and pauses in menus, scanning,
+  and screen sleep.
+- **Preview scanning:** bounded ranges, C/N thresholds, station dwell, direction,
+  pause/resume, and skip. It does not replace the saved station list.
 - **Signal diagnostics:** C/N, estimated RF level, frequency offset, stereo
   status, tuner gain, and tuner supply voltage.
 - **Display sleep:** switches off the LCD and backlight while audio continues.
@@ -22,9 +29,11 @@ assembles the added 8051 code directly in Python.
   screen sleep after 10, 30, or 60 seconds, or Off.
 - **Versioned startup:** firmware version and build date on the welcome screen.
 
-RC3 has passed instruction emulation, LCD rendering from RAM, and verified USB
-programming on matching hardware. Cold-boot checks of RC3 preferences and
-actual automatic-sleep timing on the installed radio are still pending.
+RC4 has been flashed to the test radio with two matching full-image readbacks;
+the boot area, settings, and station lists were preserved. All four screens were
+also exercised on the physical LCD from RAM, with rendered page CRC checks.
+Instruction tests cover the new controls and scanning state machine. Normal boot,
+live RF behavior, and user acceptance of RC4 are still pending.
 
 ## On the radio
 
@@ -57,17 +66,51 @@ Inside **settings**, use:
 | **5** | Screen timeout: Off → 10 → 30 → 60 seconds |
 | **6** | Save, exit, and switch off the screen |
 | **7** | Save, exit, and open diagnostics |
+| **8** | Open preview-scan options |
 | **9** | Show or hide shortcut help |
 | **0**, or **hold 8** | Save and exit |
 
 FM settings apply only in FM. Menu changes save on exit; shortcut changes save
 after about three seconds of idle playback. Wait for that save before removing
-power or changing tasks. Automatic screen sleep defaults to **Off**, pauses
+power or changing tasks. A `*` in the menu means unsaved changes; `!`
+means a save/readback failed and will be retried. RC3 preferences load without
+losing FM or screen-timeout choices; scan settings are added on the next save.
+Automatic screen sleep defaults to **Off**, pauses
 in settings and during scanning, and resets its countdown on key activity.
 
 Inside **FM diagnostics**, short keys are **1** bandwidth, **2** mono, **3**
 exit, **4** screen off, **5** bass, and **6** de-emphasis. In **AM diagnostics**,
-use **3** to exit and **4** for screen off.
+use **3** to exit and **4** for screen off. In either meter, **7** switches
+between values and the signal graph. In the graph, **0** clears history.
+
+## Preview scanning
+
+Open **hold 8 → 8**. Tune to the desired area before opening the scanner.
+
+| Key | Action |
+| --- | --- |
+| **1** | Range: Broadcast → Near → Wide → Full |
+| **2** | Minimum C/N: 4 → 8 → 12 → 16 dB |
+| **3** | Station pause: 2 → 5 → 10 seconds |
+| **4** | Direction: up / down |
+| **5** | Run, pause, or resume |
+| **6** | Skip to the next channel |
+| **7** | Restart from the selected range boundary |
+| **8** | Stop and return to settings |
+| **0** | Stop and return to the radio screen |
+
+Broadcast uses FM 87–108 MHz, the original MW band, or SW 4.75–21.85 MHz.
+Near spans ±1 MHz in FM or ±100 kHz in AM; Wide spans ±5 MHz or ±500 kHz.
+Full uses the expanded band limits. All ranges are clamped to the band and
+aligned to its existing tuning step; the actual boundaries appear on screen.
+
+Scanning starts at the current channel when it is inside the range and stops
+at the far boundary. A station must complete tuning, report lock, and meet the
+C/N threshold before the dwell pause. A tuning timeout advances the scan.
+**Hold 4** pauses scanning and sleeps the LCD; after waking, use **5** to resume.
+Other ordinary radio controls leave preview scanning before normal handling.
+Scan options save when leaving the scanner/menu. The original scan controls
+retain their stock behavior.
 
 ## Build
 
@@ -91,7 +134,7 @@ run the fetcher without `--firmware` and pass `SOURCE=/path/to/stock.bin` to
 `make build` and `make verify`. The executable and CRC-table prefix must match
 the researched stock v1.4 layout; individual saved settings may differ.
 
-The output is `build/v115-full-features-rc3.bin`, a complete scrambled SPI
+The output is `build/v115-full-features-rc4.bin`, a complete scrambled SPI
 image, with a manifest, validation reports, decoded analysis image, and boot
 preview alongside it. **Program the `.bin` image, not `.decoded.bin`.**
 Builds are deterministic. Existing image outputs are not overwritten; use
@@ -99,8 +142,10 @@ Builds are deterministic. Existing image outputs are not overwritten; use
 
 `make smoke` runs a quick display check. `make verify` runs the full suite:
 
-- 6,922 native instruction cases and 512 stock LCD guard cases.
-- 912 cold-start preference cases, including invalid saved records.
+- 8,636 native instruction cases and 2,048 stock LCD guard/ownership cases.
+- 1,488 cold-start preference cases, including RC3 migration and invalid records.
+- 10 signal-history sequences, 28 graph pixel cases, and 320 home/menu pixel cases.
+- 465 scanner state-machine cases and 80 scanner pixel cases.
 - 10,226 tuning-grid frequencies, 90 boundaries, and 10 UI getters.
 - Rebuild, scrambling, header/section CRCs, all 61 block CRCs, and resource
   preservation checks.
@@ -129,17 +174,26 @@ the tested **Zbit `5e4015`** flash profile: 2 MiB capacity, 4 KiB sectors, and
 
    ```sh
    python3 flash_update.py --baseline local/radio.bin --source stock.bin \
-     --image build/v115-full-features-rc3.bin --session local/plan
+     --image build/v115-full-features-rc4.bin --session local/plan
    ```
 
 5. To program, use a new session directory and add `--write`:
 
    ```sh
    python3 flash_update.py --baseline local/radio.bin --source stock.bin \
-     --image build/v115-full-features-rc3.bin --session local/flash --write
+     --image build/v115-full-features-rc4.bin --session local/flash --write
    ```
 
-The writer accepts supported stock firmware or this exact release. Older custom
+The writer accepts supported stock firmware, this exact release, and the reviewed
+RC3 executable. Before upgrading RC3, run the migration model against your fresh
+local backup (or the exact RC3 image):
+
+```sh
+python3 verify_flash_update.py --source stock.bin --prior local/radio.bin
+```
+
+This models complete programming and recovery from four partial writes. The
+writer requires this image-bound migration evidence for RC3; other custom
 releases require a separately reviewed migration. It requires matching backup
 reads and image-bound validation, preserves the first **8 KiB**, retains current
 settings and station lists, and changes only application code, its CRC table,
@@ -149,21 +203,26 @@ folders retain the original image, target, plan, and recovery journal.
 
 Keep your verified original backup outside the checkout and have SPI recovery
 available. After verification finishes, disconnect USB and restart normally
-without holding **1**. For an RC3 acceptance check, open settings, select **10S**,
+without holding **1**. For an RC4 acceptance check, open settings, select **10S**,
 save with **0**, test sleep/wake, then restart and check that the preference remains.
+Also test **hold 2 → 7** for the graph and **hold 8 → 8** for a short scan.
+`python3 preview_ui.py --all` checks all four new screens from loader RAM with
+demonstration values and does not program flash.
 
 ## Implementation
 
 | Area | Implementation |
 | --- | --- |
 | Image format | Per-block scrambling, section CRCs, and a 61-entry block CRC table |
-| Native code | Common glue plus 2 KiB banks 0x31–0x34 for menu, preferences, control, and diagnostics |
-| Preferences | Eight bytes at group-0 offsets 0xE0–0xE7, using the stock parameter-record writer |
-| Display | ST7565-compatible 128×64 LCD; SPI/DMA updates are suppressed while asleep |
+| Native code | Common glue plus checked 2 KiB banks 0x2C–0x34 for views, history, preferences, and scanning |
+| Preferences | Sixteen versioned bytes at group-0 offsets 0xE0–0xEF; stock record writer and CRC; V1 migration |
+| Display | ST7565-compatible 128×64 LCD; SPI/DMA updates are suppressed while asleep and native draws yield to custom views |
 | Protection | CRC balancing in unused application padding keeps boot/header sectors unchanged |
 
-The current additions use 6,102 bytes of code, font, and strings. Fourteen
-wholly empty 2 KiB application banks remain, plus padding in occupied banks.
+The current additions use 14,242 bytes of code, font, and strings. Nine
+wholly empty 2 KiB application banks remain (18 KiB), plus padding in occupied banks.
+History and scanner state use 128 bytes in the checked common-RAM tail; the
+stock audio buffer is not borrowed.
 
 The extended ranges are software tuning limits; reception, antenna paths, and
 RF performance across them are not guaranteed. FM still steps by 100 kHz and

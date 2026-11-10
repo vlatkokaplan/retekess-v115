@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from spi_flash import transaction_stub, CAPACITY, PROTECTED, SECTOR, PAGE, ROOT
-from flash_update import prepare, install, RESOURCE_SECTORS
+from flash_update import prepare, install, RESOURCE_SECTORS, CODE_END, KNOWN_PRIOR_IMAGES
 from build_full_feature_image import build
 from native_features import VERSION
 from firmware_integrity import finalize
@@ -57,6 +57,7 @@ class NorModel:
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
+    p.add_argument('--prior',type=Path,help='also model the reviewed RC3 migration from a local image')
     args=p.parse_args()
     root=ROOT/'build';root.mkdir(exist_ok=True)
     source=args.source.read_bytes();release,_=build(source)
@@ -83,10 +84,10 @@ def main():
                                   (2,0x2000,257),(2,CAPACITY,1),(2,0x2000,0)]]
     invalid += [dict(opcode=op,writable=True) for op in (0x01,0x31,0xC7,0x60,0xD8,0x52)]
     invalid += [dict(opcode=0x06),dict(opcode=0x20,address=0x2000)]
-    for args in invalid:
-        try:transaction_stub(**args)
+    for request in invalid:
+        try:transaction_stub(**request)
         except ValueError:rejected+=1
-        else:raise AssertionError(f'unsafe SPI request accepted: {args}')
+        else:raise AssertionError(f'unsafe SPI request accepted: {request}')
     for address in sectors:
         transaction_stub(0x20,address,writable=True)
         for offset in range(0,SECTOR,PAGE):
@@ -113,7 +114,20 @@ def main():
     assert bytes(model.data)==baseline and not model.writable
     assert target[0x134000:]==baseline[0x134000:]
     assert session.events
-    report=dict(version=VERSION,unsafe_spi_requests_rejected=rejected,legal_page_stubs_verified=len(sectors)*16,
+    prior_sha=None
+    if args.prior:
+        prior=args.prior.read_bytes();prior_sha=hashlib.sha256(prior[:CODE_END]).hexdigest()
+        assert prior_sha in KNOWN_PRIOR_IMAGES
+        migrated,changed=prepare(prior,release,source)
+        for failure in (None,1,24,60,90):
+            model=NorModel(prior,fail_program=failure);session=MemorySession()
+            try:install(model,prior,migrated,changed,session,permitted_resource_sectors=RESOURCE_SECTORS)
+            except RuntimeError:
+                assert failure is not None and bytes(model.data)==prior
+            else:
+                assert failure is None and bytes(model.data)==migrated
+            assert not model.writable
+    report=dict(candidate_sha256=hashlib.sha256(release).hexdigest(),prior_code_sha256=prior_sha,version=VERSION,unsafe_spi_requests_rejected=rejected,legal_page_stubs_verified=len(sectors)*16,
                 complete_update_model_passed=True,partial_program_rollback_cases=recovered,
                 oversized_erase_detected_and_restored=True,
                 protected_prefix_and_current_settings_preserved=True,

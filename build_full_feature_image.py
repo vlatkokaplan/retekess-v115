@@ -44,10 +44,14 @@ def build(original):
                                'FM diagnostic short 2: auto/mono; short 3: exit',
                                'hold 3: FM auto/mono; hold 4: LCD and backlight off, consume wake gesture',
                                'hold 7: FM bass boost; hold 6: FM 50/75 us de-emphasis; original hold 5 retained',
-                               'diagnostic short 4/5/6: screen off / bass / de-emphasis',
+                               'diagnostic short 4/5/6: screen off / bass / de-emphasis; bandwidth updates immediately',
                                'hold 8: settings menu and shortcut help',
                                'journaled FM and screen timeout preferences; 3-second shortcut save debounce',
                                'automatic screen sleep Off/10/30/60 seconds; suspended in menus/scans',
+                               '32-sample C/N history and peak hold; meter short 7 toggles graph, graph short 0 clears',
+                               'large-frequency home view, relative C/N bar and mode-aware settings',
+                               'bounded preview scanning with range, C/N threshold, dwell and direction; presets untouched',
+                               'V1 preference migration; V2 scan preferences in the existing parameter group',
                                'versioned welcome image; quiet-clock gating removed'],
                      defaults=dict(diagnostics=False,display_sleep=False,screen_timeout_seconds=0),
                      status='Build artifact; see the image-bound validation report and README for hardware-test scope',
@@ -75,13 +79,13 @@ def sector_plan(original, candidate, sector_size=4096):
                 protected_prefix_bytes=0x2000,
                 sectors=sectors,
                 proposed_order=[s['start'] for s in sectors if not s['overlaps_boot']]+[s['start'] for s in sectors if s['overlaps_boot']],
-                note='Offline sector plan only; erase geometry remains assumed. Reconstruct and verify complete sectors. The release image preserves the first 8 KiB; a future writer must refuse any erase intersecting that prefix.')
+                note='Offline sector plan only; erase geometry remains assumed. Reconstruct and verify complete sectors. The release image preserves the first 8 KiB; the writer refuses any erase intersecting that prefix.')
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--output',type=Path,default=ROOT/'build/v115-full-features-rc3.bin')
+    p.add_argument('--output',type=Path,default=ROOT/'build/v115-full-features-rc4.bin')
     args=p.parse_args()
     targets=[args.output,args.output.with_suffix('.manifest.json'),args.output.with_suffix('.decoded.bin')]
     if any(t.exists() for t in targets):

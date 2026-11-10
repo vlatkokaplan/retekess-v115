@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Assemble native V115 diagnostics, display sleep and FM audio controls.
 
-Offline only. Common glue/state use the checked common-code tail; four wholly
-zero application banks hold control, diagnostics, settings and menu rendering. No USB or flash writer.
+Offline only. Common glue/state use the checked common-code tail; nine wholly
+zero application banks hold control, diagnostics, settings, history and scanning.
+No USB access or flash writer.
 """
 from pathlib import Path
 import hashlib
@@ -11,8 +12,8 @@ from lcd_draw import Asm
 from bandwidth_patch import farcall
 
 COMMON_PC = 0x16EC
-STATE = 0x17C0
-STATE_SIZE = 64
+STATE = 0x1780
+STATE_SIZE = 128
 CONTROL_BANK = 0x33
 DISPLAY_BANK = 0x34
 CONTROL_FLASH = 0x3000 + CONTROL_BANK * 0x800
@@ -22,10 +23,10 @@ METRICS = 8  # registers 20..27
 REG7, FREQ = 16, 17
 CN, RF, RFGAIN, IFGAIN, VOLTAGE = 19, 20, 21, 22, 23
 CURSOR = 25
-VERSION = '1.5-RC3'
+VERSION = '1.5-RC4'
 SETTINGS_BANK, MENU_BANK = 0x32, 0x31
 PREF_REG, TIMEOUT, IDLE, NV_DIRTY = 32, 33, 34, 35
-PREF_RECORD, SAVE_TICKS, AUTO_DUE, ACTION = 37, 46, 48, 50
+PREF_RECORD, SAVE_TICKS, AUTO_DUE, ACTION = 37, 120, 121, 122
 MENU, HELP = 4, 8
 LONG_MENU = 0xBE
 LONG_BW, LONG_DIAG, LONG_MONO, LONG_SCREEN = range(0xB7,0xBB)
@@ -35,6 +36,21 @@ SHORT_4, SHORT_5, SHORT_6 = 0x9A, 0x9B, 0x9C
 BL_COUNT, BL_LEVEL, WAKE_BLOCK = 27, 28, 29
 LAST_KEY = 30
 DISPLAY_SLEEP = 2
+GRAPH = 0x10
+SCAN_UI = 0x20
+UI_ACTIVE, UI_PAINT = 5, 6
+GRAPH_HEAD, GRAPH_COUNT, GRAPH_PEAK = 53, 54, 55
+GRAPH_FREQ, GRAPH_MODE, GRAPH_PENDING = 56, 58, 59
+FONT_SCALE = 60
+HISTORY = 64
+HISTORY_SIZE = 32
+GRAPH_BANK, GRAPH_DISPLAY_BANK, HOME_BANK = 0x30, 0x2F, 0x2E
+SCAN_BANK, SCAN_DISPLAY_BANK = 0x2D, 0x2C
+SCAN_STATUS, SCAN_DIRECTION, SCAN_THRESHOLD, SCAN_DWELL, SCAN_RANGE = 96, 97, 98, 99, 100
+SCAN_LOW, SCAN_HIGH, SCAN_START = 101, 103, 105
+SCAN_STEP, SCAN_MODE, SCAN_TICK, SCAN_WAIT, SCAN_REMAIN, SCAN_CN = 107, 108, 109, 110, 111, 112
+SCAN_ACTION, SCAN_SETTLE, SCAN_FAILED = 113, 114, 115
+PREF_SIZE = 16
 
 
 def jump(a, label):
@@ -76,11 +92,10 @@ def common_glue():
         farcall(a, CONTROL_BANK, 0x1800 + entry * 3)
 
     def protect_call(entry):
-        for reg in (0xE0, 0xD0, 0x82, 0x83):
-            a.push(reg)
-        call_control(entry)
-        for reg in (0x83, 0x82, 0xD0, 0xE0):
-            a.pop(reg)
+        a.push(0xE0)
+        a.movai(entry*3)
+        a.lcall('protected_control')
+        a.pop(0xE0)
 
     labels['init'] = a.base + len(a.code)
     call_control(0)
@@ -97,6 +112,17 @@ def common_glue():
     protect_call(2)
     a.emit(0x02, 0x42, 0xDB)  # original key handler, with selected R1
 
+    labels['draw'] = a.base + len(a.code)
+    protect_call(3)
+    a.ret()
+
+    a.L('protected_control')
+    for reg in (0xD0,0x82,0x83):a.push(reg)
+    a.movda(0x82);a.movdi(0x83,0x18)
+    a.movai(CONTROL_BANK);a.emit(0x12,0x01,0x33)
+    for reg in (0x83,0x82,0xD0):a.pop(reg)
+    a.ret()
+
     # Patched into bank 2 lcd_update's six-byte prologue. Carry clear takes
     # its existing out-of-range return branch, without starting SPI or DMA.
     labels['lcd_guard'] = a.base + len(a.code)
@@ -104,7 +130,10 @@ def common_glue():
         a.push(reg)
     read(a, STATE + FLAGS)
     a.anlai(DISPLAY_SLEEP)
-    a.jz('lcd_awake')
+    jnz(a,'lcd_blocked')
+    read(a,STATE+UI_ACTIVE);a.jz('lcd_awake')
+    a.emit(0xA3,0xE0);jnz(a,'lcd_awake')
+    a.L('lcd_blocked')
     for reg in (0x83, 0x82, 0xD0, 0xE0):
         a.pop(reg)
     a.setb(0xB1);a.clr(0xD7);a.ret()
@@ -120,7 +149,7 @@ def common_glue():
 
 def control(base=0x1800, state=STATE):
     a = Asm(base)
-    for name in ('init', 'before_wait', 'message'):
+    for name in ('init', 'before_wait', 'message', 'draw'):
         jump(a, name)
 
     def get(field):
@@ -145,8 +174,23 @@ def control(base=0x1800, state=STATE):
     a.emit(0xA3)
     a.djnz(0, 'init_zero')
     farcall(a,SETTINGS_BANK,0x1800)
+    put(GRAPH_PENDING,1);dirty()
     restore_context(a)
     bank_return()
+
+    a.L('draw')
+    save_context(a)
+    a.lcall('safe');a.jnc('draw_stock')
+    read(a,0x3CD1);a.jz('draw_idle');dirty()
+    a.L('draw_idle');a.lcall('paint');a.sjmp('draw_done')
+    a.L('draw_stock');a.lcall('release_ui');a.emit(0x12,0x41,0x84)
+    a.L('draw_done');restore_context(a);bank_return()
+
+    a.L('release_ui')
+    put(SCAN_STATUS,0)
+    get(UI_ACTIVE);a.jz('release_ui_done')
+    put(UI_ACTIVE,0);write(a,0x3CD1,1)
+    a.L('release_ui_done');a.ret()
 
     a.L('safe')
     # Stock radio task=3, no scanning/submode, real FM/MW/SW playback mode.
@@ -175,22 +219,39 @@ def control(base=0x1800, state=STATE):
     jump(a,'wait_done')
     a.L('wait_dark_unsafe')
     a.lcall('wake_screen')
-    get(FLAGS);a.anlai(0xF2);a.movxda()
+    get(FLAGS);a.anlai(0xC2);a.movxda()
     jump(a,'wait_done')
     a.L('wait_awake')
     a.lcall('safe');a.jnc('wait_unsafe')
     farcall(a,SETTINGS_BANK,0x1803)
-    get(FLAGS);a.anlai(0x0D);a.jz('wait_done')
-    get(DIRTY);a.jz('wait_done')
-    put(DIRTY,0);a.lcall('sample')
-    get(FLAGS);a.anlai(MENU);a.jz('wait_diag')
-    farcall(a,MENU_BANK,0x1800);a.sjmp('wait_done')
-    a.L('wait_diag');farcall(a,DISPLAY_BANK,0x1800)
+    get(FLAGS);a.anlai(SCAN_UI);a.jz('wait_no_scan')
+    farcall(a,SCAN_BANK,0x1803)
+    a.L('wait_no_scan');a.lcall('paint')
     a.sjmp('wait_done')
     a.L('wait_unsafe')
-    get(FLAGS);a.anlai(0xF2);a.movxda()
+    a.lcall('release_ui')
+    get(FLAGS);a.anlai(0xC2);a.movxda()
     a.L('wait_done')
     restore_context(a);bank_return()
+
+    a.L('paint')
+    get(FLAGS);a.anlai(DISPLAY_SLEEP);a.jz('paint_awake');a.ret()
+    a.L('paint_awake');put(UI_ACTIVE,1)
+    get(DIRTY);a.jz('paint_done')
+    put(DIRTY,0);write(a,0x3CD1,0);a.lcall('sample')
+    farcall(a,GRAPH_BANK,0x1800)
+    put(UI_PAINT,1)
+    get(FLAGS);a.anlai(SCAN_UI);a.jz('paint_not_scan')
+    farcall(a,SCAN_DISPLAY_BANK,0x1800);jump(a,'paint_finished')
+    a.L('paint_not_scan');get(FLAGS);a.anlai(MENU);a.jz('paint_radio')
+    farcall(a,MENU_BANK,0x1800);a.sjmp('paint_finished')
+    a.L('paint_radio');get(FLAGS);a.anlai(1);a.jz('paint_home')
+    get(FLAGS);a.anlai(GRAPH);a.jz('paint_meter')
+    farcall(a,GRAPH_DISPLAY_BANK,0x1800);a.sjmp('paint_finished')
+    a.L('paint_meter');farcall(a,DISPLAY_BANK,0x1800);a.sjmp('paint_finished')
+    a.L('paint_home');farcall(a,HOME_BANK,0x1800)
+    a.L('paint_finished');put(UI_PAINT,0)
+    a.L('paint_done');a.ret()
 
     a.L('message')
     save_context(a)
@@ -219,6 +280,10 @@ def control(base=0x1800, state=STATE):
     a.lcall('release_block')
     jump(a,'consume_dirty')
     a.L('awake_dispatch')
+    a.movar(1);a.cjne_ai(0xFE,'not_graph_tick');put(GRAPH_PENDING,1)
+    a.L('not_graph_tick')
+    a.movar(1);a.cjne_ai(0xFE,'not_home_tick');dirty()
+    a.L('not_home_tick')
     a.lcall('safe');a.emit(0x40);a._rel('dispatch_safe');jump(a,'message_done')
     a.L('dispatch_safe')
     farcall(a,SETTINGS_BANK,0x1806)
@@ -235,7 +300,10 @@ def control(base=0x1800, state=STATE):
         next_label='key_'+str(key)
         a.cjne_ai(key,next_label);jump(a,label);a.L(next_label)
     get(FLAGS);a.anlai(1);a.jz('dispatch_reject')
-    a.movar(1)
+    a.movar(1);a.cjne_ai(0x9D,'graph_clear_key');jump(a,'toggle_graph')
+    a.L('graph_clear_key');a.cjne_ai(0x96,'diagnostic_keys')
+    get(FLAGS);a.anlai(GRAPH);a.jz('diagnostic_keys');jump(a,'clear_graph')
+    a.L('diagnostic_keys');a.movar(1)
     for key,label in [(SHORT_1,'bandwidth'),(SHORT_2,'mono'),
                       (SHORT_3,'toggle_view'),(SHORT_4,'sleep_screen'),
                       (SHORT_5,'bass'),(SHORT_6,'deemphasis')]:
@@ -249,7 +317,7 @@ def control(base=0x1800, state=STATE):
     jump(a,'message_done')
     a.L('other_key_up')
     a.movar(1);a.emit(0xC3,0x94,0xC0);a.jnc('dispatch_reject')
-    get(FLAGS);a.anlai(0xF2);a.movxda()
+    get(FLAGS);a.anlai(0xC2);a.movxda()
     write(a,0x3CD1,1);jump(a,'message_done')
 
     a.L('physical')
@@ -290,6 +358,10 @@ def control(base=0x1800, state=STATE):
     a.L('wake_light_done')
     write(a,0x3CD1,1);dirty();a.pop(1);a.ret()
 
+    a.L('toggle_graph')
+    get(FLAGS);a.emit(0x64,GRAPH);a.movxda();jump(a,'consume_dirty')
+    a.L('clear_graph')
+    farcall(a,GRAPH_BANK,0x1803);jump(a,'consume_dirty')
     a.L('toggle_view')
     get(FLAGS);a.emit(0x64,1);a.movxda()
     write(a,0x3CD1,1);jump(a,'consume_dirty')
@@ -320,9 +392,6 @@ def control(base=0x1800, state=STATE):
     for reg in (3,4,5):a.movri(reg,0)
     farcall(a,0x1D,0x1D17);a.pop(0xE0)
     farcall(a,SETTINGS_BANK,0x1809)
-    get(FLAGS);a.anlai(MENU);jnz(a,'audio_view_done')
-    get(FLAGS);a.orlai(1);a.movxda()  # show the selected audio setting
-    a.L('audio_view_done')
     jump(a,'consume_dirty')
 
     a.L('consume_dirty');put(26,0)
@@ -621,10 +690,10 @@ def renderer(base=0x1800, state=STATE, line_update=None, menu_screen=False):
         next_row()
         get(MODE)
         a.cjne_ai(1, 'footer_am')
-        text('1BW 2MO 3X 4OFF 5B 6D')
+        text('3 EXIT 7 GRAPH 4 OFF')
         a.sjmp('footer_done')
         a.L('footer_am')
-        text('3:EXIT 4:SCREEN OFF')
+        text('3 EXIT 7 GRAPH 4 OFF')
         a.L('footer_done')
         flush(6)
     a.L('render_done')
@@ -750,11 +819,12 @@ def renderer(base=0x1800, state=STATE, line_update=None, menu_screen=False):
 
 
 def menu_renderer(base=0x1800,state=STATE,line_update=None):
-    return renderer(base,state,line_update,menu_screen=True)
+    from radio_ui import settings_renderer
+    return settings_renderer(base,state)
 
 
 def settings(base=0x1800, state=STATE):
-    """Use stock group-0 record bytes E0..E7 and its journaled writer.
+    """Use stock group-0 record bytes E0..EF and its journaled writer.
 
     Native callers use 00..CA in group 0. FM's 60 u16 slots end at CA;
     AM lists occupy other groups. Record CRC/magic remain stock-owned.
@@ -770,9 +840,13 @@ def settings(base=0x1800, state=STATE):
 
     a.L('prefs_init');save_context(a)
     read(a,0x3B3A);a.anlai(0x3F);a.movdptr(state+PREF_REG);a.movxda()
+    put(SCAN_THRESHOLD,1);put(SCAN_DWELL,1);put(SCAN_DIRECTION,1);put(SCAN_RANGE,0)
     a.lcall('read_record');a.lcall('valid_record');a.jnc('prefs_init_done')
     get(PREF_RECORD+3);a.movdptr(state+PREF_REG);a.movxda()
     get(PREF_RECORD+4);a.movdptr(state+TIMEOUT);a.movxda()
+    get(PREF_RECORD+2);a.cjne_ai(2,'prefs_init_done')
+    for field,source in [(SCAN_THRESHOLD,8),(SCAN_DWELL,9),(SCAN_DIRECTION,10),(SCAN_RANGE,11)]:
+        get(PREF_RECORD+source);a.movdptr(state+field);a.movxda()
     a.L('prefs_init_done');finish()
 
     a.L('prefs_poll');save_context(a)
@@ -817,11 +891,17 @@ def settings(base=0x1800, state=STATE):
     a.L('prefs_no_activity')
     a.movri(0,0x8C);a.emit(0xE6);a.jz('prefs_unlocked');jump(a,'prefs_message_done')
     a.L('prefs_unlocked')
-    a.movar(1);a.cjne_ai(LONG_MENU,'menu_keys')
+    get(FLAGS);a.anlai(SCAN_UI);a.jz('prefs_not_scan')
+    farcall(a,SCAN_BANK,0x1806)
+    get(FLAGS);a.anlai(SCAN_UI);a.jz('scan_exit_save')
+    get(ACTION);a.cjne_ai(5,'scan_dispatch_done')
+    a.L('scan_exit_save');a.lcall('commit')
+    a.L('scan_dispatch_done');jump(a,'prefs_message_done')
+    a.L('prefs_not_scan');a.movar(1);a.cjne_ai(LONG_MENU,'menu_keys')
     get(FLAGS);a.anlai(MENU);a.jz('menu_open')
     a.lcall('close_menu');a.sjmp('menu_hold_block')
     a.L('menu_open')
-    get(FLAGS);a.anlai(0xF2);a.orlai(MENU);a.movxda()
+    get(FLAGS);a.anlai(0xC2);a.orlai(MENU);a.movxda()
     a.L('menu_hold_block');put(WAKE_BLOCK,1);put(LAST_KEY,LONG_MENU&31);action(7)
     a.L('menu_keys')
     get(FLAGS);a.anlai(MENU);jnz(a,'menu_dispatch')
@@ -831,7 +911,7 @@ def settings(base=0x1800, state=STATE):
     a.L('menu_dispatch')
     a.movar(1)
     for key,name in [(0x96,'menu_exit'),(0x9F,'menu_help'),(0x9B,'menu_timeout'),
-                     (0x9C,'menu_sleep'),(0x9D,'menu_signal')]:
+                     (0x9C,'menu_sleep'),(0x9D,'menu_signal'),(0x9E,'menu_scan')]:
         nxt='menu_key_'+str(key);a.cjne_ai(key,nxt);jump(a,name);a.L(nxt)
     get(FLAGS);a.anlai(HELP);a.jz('menu_audio');action(7)
     a.L('menu_audio')
@@ -857,22 +937,30 @@ def settings(base=0x1800, state=STATE):
     a.L('menu_timeout_edit')
     get(TIMEOUT);a.emit(0x04);a.anlai(3);a.movxda()
     put(NV_DIRTY,1);put(SAVE_TICKS,0);action(7)
+    a.L('menu_scan');get(FLAGS);a.anlai(0xC2);a.orlai(MENU|SCAN_UI);a.movxda()
+    farcall(a,SCAN_BANK,0x1800);action(7)
     a.L('menu_sleep');a.lcall('close_menu');action(5)
     a.L('menu_signal');a.lcall('close_menu');action(6)
     a.L('prefs_message_done');finish()
 
     a.L('close_menu');a.lcall('commit')
-    get(FLAGS);a.anlai(0xF2);a.movxda();write(a,0x3CD1,1);put(DIRTY,1);a.ret()
+    get(FLAGS);a.anlai(0xC2);a.movxda();write(a,0x3CD1,1);put(DIRTY,1);a.ret()
 
     a.L('valid_record')
-    for field,value in [(0,0x52),(1,0x33),(2,1),(7,0xA5)]:
+    for field,value in [(0,0x52),(1,0x33),(7,0xA5)]:
         get(PREF_RECORD+field);a.cjne_ai(value,'record_invalid')
     get(PREF_RECORD+3);a.emit(0xFA);a.anlai(0xC0);jnz(a,'record_invalid')
     get(PREF_RECORD+5);a.emit(0x6A);a.cjne_ai(0xFF,'record_invalid')
     get(PREF_RECORD+4);a.emit(0xFA,0xC3,0x94,4);a.jnc('record_invalid')
     get(PREF_RECORD+6);a.emit(0x6A);a.cjne_ai(0xFF,'record_invalid')
-    a.setb(0xD7);a.ret()
+    get(PREF_RECORD+2);a.cjne_ai(1,'record_v2');a.setb(0xD7);a.ret()
     a.L('record_invalid');a.clr(0xD7);a.ret()
+    a.L('record_v2');a.cjne_ai(2,'record_invalid')
+    # V2 adds four independently complemented scan options. V1 migrates in RAM.
+    for field,limit in [(8,4),(9,3),(10,2),(11,4)]:
+        get(PREF_RECORD+field);a.emit(0xFA,0xC3,0x94,limit);a.jnc('record_invalid')
+        get(PREF_RECORD+field+4);a.emit(0x6A);a.cjne_ai(0xFF,'record_invalid')
+    a.setb(0xD7);a.ret()
 
     a.L('read_record')
     a.push(1);a.movri(7,0)
@@ -883,7 +971,7 @@ def settings(base=0x1800, state=STATE):
     a.emit(0x12,0x20,0x8A)  # spi_read8: address R2..R5, value R1
     a.pop(7);a.movar(7);a.emit(0x24,(state+PREF_RECORD)&255,0xF5,0x82)
     a.movdi(0x83,(state+PREF_RECORD)>>8);a.movar(1);a.movxda()
-    a.incr(7);a.movar(7);a.cjne_ai(8,'read_record_byte')
+    a.incr(7);a.movar(7);a.cjne_ai(PREF_SIZE,'read_record_byte')
     a.pop(1);a.ret()
 
     a.L('commit');a.push(1)
@@ -891,21 +979,30 @@ def settings(base=0x1800, state=STATE):
     a.L('commit_check')
     # A round trip back to the stored choices requires no flash operation.
     a.lcall('valid_record');a.jnc('commit_write')
+    get(PREF_RECORD+2);a.cjne_ai(2,'commit_write')
     get(PREF_RECORD+3);a.emit(0xFA);get(PREF_REG);a.emit(0x6A);jnz(a,'commit_write')
-    get(PREF_RECORD+4);a.emit(0xFA);get(TIMEOUT);a.emit(0x6A);a.jz('commit_clean')
+    get(PREF_RECORD+4);a.emit(0xFA);get(TIMEOUT);a.emit(0x6A);jnz(a,'commit_write')
+    for field,source in [(SCAN_THRESHOLD,8),(SCAN_DWELL,9),(SCAN_DIRECTION,10),(SCAN_RANGE,11)]:
+        get(PREF_RECORD+source);a.emit(0xFA);get(field);a.emit(0x6A);jnz(a,'commit_write')
+    jump(a,'commit_clean')
     a.L('commit_write')
-    for field,value in [(0,0x52),(1,0x33),(2,1),(7,0xA5)]:put(PREF_RECORD+field,value)
+    for field,value in [(0,0x52),(1,0x33),(2,2),(7,0xA5)]:put(PREF_RECORD+field,value)
     for source,dest in [(PREF_REG,3),(TIMEOUT,4)]:
         get(source);a.movdptr(state+PREF_RECORD+dest);a.movxda()
         a.emit(0xF4);a.movdptr(state+PREF_RECORD+dest+2);a.movxda()
+    for source,dest in [(SCAN_THRESHOLD,8),(SCAN_DWELL,9),(SCAN_DIRECTION,10),(SCAN_RANGE,11)]:
+        get(source);a.movdptr(state+PREF_RECORD+dest);a.movxda();a.emit(0xF4)
+        a.movdptr(state+PREF_RECORD+dest+4);a.movxda()
     a.movai(0);a.push(0xE0)  # stock fifth argument: group 0
     a.movri(1,0xE0);a.movri(2,(state+PREF_RECORD)&255);a.movri(3,(state+PREF_RECORD)>>8)
-    a.movri(4,8);a.movri(5,0);farcall(a,0x0E,0x1C84);a.pop(0xE0)
+    a.movri(4,PREF_SIZE);a.movri(5,0);farcall(a,0x0E,0x1C84);a.pop(0xE0)
     a.lcall('read_record');a.lcall('valid_record');a.jnc('commit_retry')
     get(PREF_RECORD+3);a.emit(0xFA);get(PREF_REG);a.emit(0x6A);jnz(a,'commit_retry')
     get(PREF_RECORD+4);a.emit(0xFA);get(TIMEOUT);a.emit(0x6A);jnz(a,'commit_retry')
-    a.L('commit_clean');put(NV_DIRTY,0);a.sjmp('commit_done')
-    a.L('commit_retry');put(SAVE_TICKS,0)
+    for field,source in [(SCAN_THRESHOLD,8),(SCAN_DWELL,9),(SCAN_DIRECTION,10),(SCAN_RANGE,11)]:
+        get(PREF_RECORD+source);a.emit(0xFA);get(field);a.emit(0x6A);jnz(a,'commit_retry')
+    a.L('commit_clean');put(36,0);put(NV_DIRTY,0);a.sjmp('commit_done')
+    a.L('commit_retry');put(36,1);put(SAVE_TICKS,0)
     a.L('commit_done');a.pop(1);a.ret()
     table=a.base+len(a.code);a.code.extend(bytes([0,10,30,60]))
     a.code[timer_patch:timer_patch+2]=table.to_bytes(2,'big')
@@ -914,14 +1011,43 @@ def settings(base=0x1800, state=STATE):
     return code,a.labels
 
 
+def state_layout():
+    spans={'flags':(0,1),'legacy_clock':(1,2),'dirty_mode':(3,2),'display_ownership':(5,2),
+           'metrics':(8,8),'reg7':(16,1),'frequency':(17,2),'signal':(19,6),'cursor_message_backlight':(25,6),
+           'preferences':(32,5),'record':(PREF_RECORD,PREF_SIZE),'graph':(GRAPH_HEAD,7),
+           'font':(FONT_SCALE,1),'history':(HISTORY,HISTORY_SIZE),'scan':(SCAN_STATUS,24),
+           'save_ticks':(SAVE_TICKS,1),'auto_sleep':(AUTO_DUE,1),'action':(ACTION,1)}
+    occupied={}
+    for name,(offset,size) in spans.items():
+        if offset<0 or offset+size>STATE_SIZE:raise ValueError('state span outside common RAM: '+name)
+        for byte in range(offset,offset+size):
+            if byte in occupied:raise ValueError('overlapping state spans: '+name+' / '+occupied[byte])
+            occupied[byte]=name
+    return {name:dict(offset=offset,bytes=size) for name,(offset,size) in spans.items()}
+
+
 def apply(plain):
+    allocation=state_layout()
     result = bytearray(plain)
     glue, labels = common_glue()
     ctl, ctl_labels = control()
     disp, disp_labels = renderer()
+    from signal_graph import history_control, graph_renderer
+    hist,hist_labels=history_control()
+    graph,graph_labels=graph_renderer()
+    from radio_scan import scan_control,scan_renderer
+    scanner,scan_labels=scan_control()
+    scan_display,scan_display_labels=scan_renderer()
+    from radio_ui import home_renderer
+    home,home_labels=home_renderer()
     prefs,prefs_labels=settings()
     menu,menu_labels=menu_renderer()
     patches = [
+        (0x3000+SCAN_BANK*0x800,bytes(0x800),scanner.ljust(0x800,b'\0'),'bounded scanner control bank'),
+        (0x3000+SCAN_DISPLAY_BANK*0x800,bytes(0x800),scan_display.ljust(0x800,b'\0'),'scanner options renderer bank'),
+        (0x3000+HOME_BANK*0x800,bytes(0x800),home.ljust(0x800,b'\0'),'large-frequency radio screen bank'),
+        (0x3000+GRAPH_BANK*0x800,bytes(0x800),hist.ljust(0x800,b'\0'),'signal history control bank'),
+        (0x3000+GRAPH_DISPLAY_BANK*0x800,bytes(0x800),graph.ljust(0x800,b'\0'),'signal graph renderer bank'),
         (0x3000+SETTINGS_BANK*0x800,bytes(0x800),prefs.ljust(0x800,b'\0'),'persistent settings bank'),
         (0x3000+MENU_BANK*0x800,bytes(0x800),menu.ljust(0x800,b'\0'),'settings menu and help bank'),
         (0x1800 + COMMON_PC, bytes(0x1800 - COMMON_PC),
@@ -937,6 +1063,7 @@ def apply(plain):
         result[flash:flash + len(after)] = after
     for pc, original, target, nops in (
         (0x4A12, '74 01 90 3c d1', labels['init'], 2),
+        (0x4A5F, '12 41 84', labels['draw'], 0),
         (0x4A62, '12 20 b1', labels['wait'], 0),
         (0x4A65, '12 42 db', labels['message'], 0),
     ):
@@ -954,5 +1081,8 @@ def apply(plain):
     return result, dict(common=labels, control=ctl_labels, display=disp_labels,
                         common_bytes=len(glue), control_bytes=len(ctl), display_bytes=len(disp),
                         settings=prefs_labels,menu=menu_labels,settings_bytes=len(prefs),menu_bytes=len(menu),
-                        state=STATE, state_bytes=STATE_SIZE, control_bank=CONTROL_BANK,
+                        scanner=scan_labels,scanner_display=scan_display_labels,scanner_bytes=len(scanner),scanner_display_bytes=len(scan_display),
+                        home=home_labels,home_bytes=len(home),
+                        history=hist_labels,graph=graph_labels,history_bytes=len(hist),graph_bytes=len(graph),
+                        state=STATE, state_bytes=STATE_SIZE, state_layout=allocation, control_bank=CONTROL_BANK,
                         display_bank=DISPLAY_BANK)

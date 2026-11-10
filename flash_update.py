@@ -18,10 +18,15 @@ from spi_flash import Flash, RawTransport, ROOT, CAPACITY, PROTECTED, SECTOR, PA
 from boot_version import OFFSET, SIZE
 from build_full_feature_image import build
 from native_features import VERSION
+from validation_requirements import *
 
 RESOURCE_SECTORS=tuple(range(OFFSET//SECTOR*SECTOR,(OFFSET+SIZE-1)//SECTOR*SECTOR+SECTOR,SECTOR))
 TRIAL=0x1D000
 CODE_END=TABLE+COUNT*2
+KNOWN_PRIOR_IMAGES={
+    '90d1da53c06b84c259c78c2da05a2dab333fa66b11a72cff37f9ffc18f5f1ed7':
+    dict(version='1.5-RC3',welcome_sha256='69b8fd06bb363cf0e6ada3f468dcb64366b8f6d0ba6974f5fab7703c199df1bf')
+}
 DATASHEET='https://www.zbitsemi.com/upload/file/20200901/20200901155301_74863.pdf'
 
 
@@ -37,12 +42,14 @@ def prepare(baseline, release, source):
     # Older custom versions need their separately reviewed migration path.
     prefix = baseline[:CODE_END]
     if prefix == source[:CODE_END]:
-        expected_welcome = source[OFFSET:OFFSET+SIZE]
+        expected_welcome = sha(source[OFFSET:OFFSET+SIZE])
     elif prefix == release[:CODE_END]:
-        expected_welcome = release[OFFSET:OFFSET+SIZE]
+        expected_welcome = sha(release[OFFSET:OFFSET+SIZE])
+    elif sha(prefix) in KNOWN_PRIOR_IMAGES:
+        expected_welcome=KNOWN_PRIOR_IMAGES[sha(prefix)]['welcome_sha256']
     else:
-        raise ValueError('device executable is neither supported stock nor this exact release')
-    if baseline[OFFSET:OFFSET+SIZE] != expected_welcome:
+        raise ValueError('device executable is neither stock, this release, nor a reviewed prior release')
+    if sha(baseline[OFFSET:OFFSET+SIZE]) != expected_welcome:
         raise ValueError('device welcome bitmap differs from its known executable version')
     target = bytearray(baseline)
     target[:CODE_END] = release[:CODE_END]
@@ -214,7 +221,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--baseline',type=Path,required=True,help='fresh full backup with matching .verify.bin')
     p.add_argument('--source',type=Path,default=ROOT/'stock.bin')
-    p.add_argument('--image',type=Path,default=ROOT/'build/v115-full-features-rc3.bin')
+    p.add_argument('--image',type=Path,default=ROOT/'build/v115-full-features-rc4.bin')
     p.add_argument('--session',type=Path,required=True,help='new local directory for backup, plan and journal')
     p.add_argument('--write',action='store_true',help='program flash; otherwise prepare offline only')
     args=p.parse_args()
@@ -224,12 +231,21 @@ def main():
     release=args.image.read_bytes()
     validation=json.loads(args.image.with_suffix('.validation.json').read_text())
     if (validation.get('candidate_sha256')!=sha(release) or validation.get('version')!=VERSION or
-            validation.get('native_machine_code_cases')!=6922 or
-            validation.get('cold_preferences_cases')!=912 or validation.get('stock_lcd_guard_cases')!=512):
+            validation.get('native_machine_code_cases')!=NATIVE_CASES or
+            validation.get('cold_preferences_cases')!=PREFERENCE_CASES or validation.get('stock_lcd_guard_cases')!=LCD_GUARD_CASES):
         p.error('complete image-bound validation report is required')
+    if (validation.get('graph_pixel_cases')!=GRAPH_PIXEL_CASES or validation.get('radio_ui_cases')!=RADIO_UI_CASES or
+            validation.get('scanner_state_cases')!=SCAN_STATE_CASES or validation.get('scanner_pixel_cases')!=SCAN_PIXEL_CASES):
+        p.error('complete graph, interface and scanner evidence is required')
     for name,want in validation['build_source_sha256'].items():
         if sha((ROOT/name).read_bytes())!=want:p.error('validated source changed: '+name)
     target,sectors=prepare(baseline,release,args.source.read_bytes())
+    if sha(baseline[:CODE_END]) in KNOWN_PRIOR_IMAGES:
+        model=json.loads((ROOT/'build/flash-writer-model-validation.json').read_text())
+        if (model.get('candidate_sha256')!=sha(release) or model.get('prior_code_sha256')!=sha(baseline[:CODE_END])):
+            p.error('run verify_flash_update.py --prior BASELINE for this migration before writing')
+        for name,want in model['source_sha256'].items():
+            if sha((ROOT/name).read_bytes())!=want:p.error('reviewed migration source changed: '+name)
     session=Session(args.session)
     session.save('original.bin',baseline);session.save('target.bin',target)
     session.report('plan.json',dict(version=VERSION,original_sha256=sha(baseline),target_sha256=sha(target),

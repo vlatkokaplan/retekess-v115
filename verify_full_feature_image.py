@@ -13,6 +13,10 @@ from build_full_feature_image import build, sector_plan
 from firmware_integrity import check, preserve_original, TABLE, COUNT
 import native_features as n
 import boot_version
+from validation_requirements import *
+from signal_graph import history_control,graph_renderer
+from radio_ui import home_renderer
+from radio_scan import scan_control,scan_renderer
 
 
 def sha256(data):
@@ -32,7 +36,7 @@ def rejected(action):
     raise ValueError('invalid image unexpectedly accepted')
 
 
-def audit(original, raw, manifest, band_evidence, native_evidence, preferences_evidence):
+def audit(original, raw, manifest, band_evidence, native_evidence, preferences_evidence, graph_evidence, ui_evidence, scan_evidence):
     exceptions=[(boot_version.OFFSET,boot_version.SIZE)]
     integrity=preserve_original(original,raw,exceptions)
     rebuilt,metadata=build(original)
@@ -53,27 +57,36 @@ def audit(original, raw, manifest, band_evidence, native_evidence, preferences_e
     require(band_evidence.get('clamp_wrap_boundary_cases_passed')==90,'incomplete band boundary evidence')
     require(band_evidence.get('ui_getter_results_verified')==10,'incomplete band getter evidence')
     require(native_evidence.get('full_suite') is True,'native evidence is only a smoke test')
-    require(native_evidence.get('machine_code_cases_passed')==6922,'incomplete native feature evidence')
-    require(native_evidence.get('stock_lcd_guard_cases_passed')==512,'incomplete LCD sleep guard evidence')
+    require(native_evidence.get('machine_code_cases_passed')==NATIVE_CASES,'incomplete native feature evidence')
+    require(native_evidence.get('stock_lcd_guard_cases_passed')==LCD_GUARD_CASES,'incomplete LCD sleep guard evidence')
     require('final-image bank bytes and emitted init/wait/message hooks' in native_evidence.get('checks',[]),
             'native tests did not exercise final-image hooks')
     for name,digest in native_evidence['source_sha256'].items():
         require(sha256((ROOT/name).read_bytes())==digest,f'native test source changed: {name}')
-    for name,fn in [('common',n.common_glue),('control',n.control),('display',n.renderer),('settings',n.settings),('menu',n.menu_renderer)]:
+    for name,fn in [('common',n.common_glue),('control',n.control),('display',n.renderer),('settings',n.settings),('menu',n.menu_renderer),('history',history_control),('graph',graph_renderer),('home',home_renderer),('scanner',scan_control),('scanner_display',scan_renderer)]:
         require(native_evidence['assembled_sha256'][name]==sha256(fn()[0]),
                 f'{name} machine code changed since emulation')
 
     require(preferences_evidence.get('candidate_sha256')==sha,'preferences evidence belongs to another image')
-    require(preferences_evidence.get('cases_passed')==912,'incomplete cold preferences evidence')
+    require(preferences_evidence.get('cases_passed')==PREFERENCE_CASES,'incomplete cold preferences evidence')
     require(preferences_evidence.get('cold_owned_state_not_preseeded') is True,'cold initialization was not tested')
     for name,digest in preferences_evidence['source_sha256'].items():
         require(sha256((ROOT/name).read_bytes())==digest,f'preferences test source changed: {name}')
+
+    for name,evidence,fields in [
+        ('graph',graph_evidence,{'history_sequences_passed':GRAPH_HISTORY_CASES,'graph_pixel_cases_passed':GRAPH_PIXEL_CASES}),
+        ('ui',ui_evidence,{'pixel_cases_passed':RADIO_UI_CASES}),
+        ('scanner',scan_evidence,{'state_machine_cases_passed':SCAN_STATE_CASES,'scanner_pixel_cases_passed':SCAN_PIXEL_CASES})]:
+        require(evidence.get('candidate_sha256')==sha,name+' evidence belongs to another image')
+        for field,value in fields.items():require(evidence.get(field)==value,'incomplete '+name+' evidence')
+        for source,digest in evidence['source_sha256'].items():
+            require(sha256((ROOT/source).read_bytes())==digest,name+' source changed: '+source)
 
     plain=decode(raw)
     # Verify the displaced init store and each hook at the actual overlay offset.
     _,labels=n.common_glue()
     for name,pc,tail in [('init',0x4A12,b'\0\0\xf0'),
-                         ('wait',0x4A62,b''),('message',0x4A65,b'')]:
+                         ('draw',0x4A5F,b''),('wait',0x4A62,b''),('message',0x4A65,b'')]:
         offset=0x1D800+pc-0x4000
         hook=bytes([0x12])+labels[name].to_bytes(2,'big')+tail
         require(plain[offset:offset+len(hook)]==hook,f'wrong {name} hook in final image')
@@ -96,6 +109,8 @@ def audit(original, raw, manifest, band_evidence, native_evidence, preferences_e
     sources=('build_full_feature_image.py','firmware_integrity.py','native_features.py',
              'band_patch.py','bandwidth_patch.py','verify_native_features.py',
              'verify_band_patch.py','verify_full_feature_image.py',
+             'native_ui.py','radio_ui.py','radio_scan.py','signal_graph.py','emulation.py',
+             'verify_signal_graph.py','verify_radio_ui.py','verify_radio_scan.py','validation_requirements.py',
              'boot_version.py','lcd_draw.py','analyze.py','env_tools.py','verify_preferences_boot.py','assets/font-5x8.bin')
     return dict(candidate_sha256=sha,source_sha256=sha256(original),
                 status='offline validated; installed application and flash/restore remain untested',
@@ -107,7 +122,9 @@ def audit(original, raw, manifest, band_evidence, native_evidence, preferences_e
                 changed_sector_starts=[s['start'] for s in plan['sectors']],
                 crc_balance=metadata['crc_balance'],
                 band_grid_cases=10226,band_boundary_cases=90,band_getter_checks=10,
-                native_machine_code_cases=6922,cold_preferences_cases=912,stock_lcd_guard_cases=512,final_image_hooks_exercised=True,
+                native_machine_code_cases=NATIVE_CASES,cold_preferences_cases=PREFERENCE_CASES,stock_lcd_guard_cases=LCD_GUARD_CASES,
+                graph_history_cases=GRAPH_HISTORY_CASES,graph_pixel_cases=GRAPH_PIXEL_CASES,radio_ui_cases=RADIO_UI_CASES,
+                scanner_state_cases=SCAN_STATE_CASES,scanner_pixel_cases=SCAN_PIXEL_CASES,final_image_hooks_exercised=True,
                 invalid_image_guards_passed=['changed code','changed block CRC',
                                              'changed settings with valid CRCs','unapproved image bytes','truncated sector plan'],
                 build_source_sha256={name:sha256((ROOT/name).read_bytes()) for name in sources},
@@ -127,7 +144,8 @@ def main():
         return json.loads(args.candidate.with_suffix(suffix).read_text())
     result=audit(args.source.read_bytes(),args.candidate.read_bytes(),
                  evidence('.manifest.json'),evidence('.emulation.json'),
-                 evidence('.native-emulation.json'),evidence('.preferences-boot-emulation.json'))
+                 evidence('.native-emulation.json'),evidence('.preferences-boot-emulation.json'),
+                 evidence('.graph-emulation.json'),evidence('.ui-emulation.json'),evidence('.scan-emulation.json'))
     path=args.candidate.with_suffix('.validation.json')
     path.write_text(json.dumps(result,indent=2)+'\n')
     print('Release audit passed:',path)

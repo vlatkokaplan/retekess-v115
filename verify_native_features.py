@@ -16,11 +16,17 @@ from band_patch import ROOT, decode
 from bandwidth_patch import handler as bandwidth_handler
 from lcd_draw import Asm
 import native_features as n
+from emulation import copy_xram,run as emulate
+from signal_graph import history_control,graph_renderer
+from radio_ui import home_renderer
+from radio_scan import scan_control,scan_renderer
 
 CTL_BASE, DISPLAY_BASE, SHIM = 0x6000, 0x6800, 0x5000
 SETTINGS_BASE, MENU_BASE = 0x3000, 0x3800
+GRAPH_BASE, GRAPH_DISPLAY_BASE, HOME_BASE = 0x5800, 0xB000, 0xB800
+SCAN_BASE, SCAN_DISPLAY_BASE = 0xA000, 0xA800
 FRAME = 0x9000
-RECORD = 64 + 32 + 16 + 1024
+RECORD = n.STATE_SIZE + 32 + 16 + 1024
 
 
 def shim():
@@ -35,6 +41,9 @@ def shim():
         n.write(a, 0x7000, code)
         a.ret()
 
+    for bank,target in [(n.GRAPH_BANK,GRAPH_BASE),(n.GRAPH_DISPLAY_BANK,GRAPH_DISPLAY_BASE),
+                        (n.HOME_BANK,HOME_BASE),(n.SCAN_BANK,SCAN_BASE),(n.SCAN_DISPLAY_BANK,SCAN_DISPLAY_BASE)]:
+        nxt='bank_'+str(bank);a.cjne_ai(bank,nxt);a.movdi(0x83,target>>8);n.jump(a,'enter_bank');a.L(nxt)
     a.cjne_ai(n.SETTINGS_BANK,'menu_bank')
     a.movdi(0x83,SETTINGS_BASE>>8);n.jump(a,'enter_bank')
     a.L('menu_bank');a.cjne_ai(n.MENU_BANK,'settings_write')
@@ -43,11 +52,11 @@ def shim():
     a.movad(0x83);a.cjne_ai(0x1C,'bad_settings')
     a.movad(0x82);a.cjne_ai(0x84,'bad_settings')
     a.movar(1);a.cjne_ai(0xE0,'bad_settings')
-    a.movar(4);a.cjne_ai(8,'bad_settings')
+    a.movar(4);a.cjne_ai(n.PREF_SIZE,'bad_settings')
     a.movar(5);n.jnz(a,'bad_settings')
     a.emit(0xA8,0x81,0x18,0x18,0xE6);n.jnz(a,'bad_settings')
     bump(0x700E)
-    a.movri(7,8);a.movri(6,0)
+    a.movri(7,n.PREF_SIZE);a.movri(6,0)
     a.L('save_pref_byte')
     a.emit(0x8A,0x82,0x8B,0x83,0xE0,0xFC,0xA3,0xAA,0x82,0xAB,0x83)
     a.movdi(0x83,0x7E);a.movar(6);a.movda(0x82);a.movar(4);a.movxda()
@@ -63,7 +72,9 @@ def shim():
     n.jump(a, 'enter_bank')
     a.L('tuner')
     a.cjne_ai(0x1D, 'lcd')
-    a.movad(0x82)
+    a.movad(0x82);a.cjne_ai(0x8B,'not_tune')
+    bump(0x7004);a.ret()
+    a.L('not_tune')
     a.cjne_ai(0xB0, 'read')
     n.jump(a, 'enter_bank')
     a.L('read')
@@ -147,9 +158,10 @@ def shim():
     a.movar(4);a.cjne_ai(0x13,'bad_pref_read')
     a.movar(5);n.jnz(a,'bad_pref_read')
     a.movar(2);a.emit(0xC3,0x94,0xE0);a.movda(0x82)
-    a.emit(0xC3,0x94,8);a.jnc('bad_pref_read')
+    a.emit(0xC3,0x94,n.PREF_SIZE);a.jnc('bad_pref_read')
     a.movdi(0x83,0x7E);a.emit(0xE0,0xF9);a.ret()
     a.L('bad_pref_read');error(5)
+    a.L('stock_draw');bump(0x7005);a.ret()
     a.L('get_msg')
     a.movdptr(0x7007)
     a.movad(0x9C)
@@ -171,16 +183,25 @@ def shim():
     return a.assemble(), a.labels
 
 
+def normalized_record(record):
+    return list(record)+[0]*(n.PREF_SIZE-len(record))
+
+
 def valid_record(record):
-    return (len(record)==8 and record[:3]==[0x52,0x33,1] and record[7]==0xA5
-            and record[3]<64 and record[4]<4 and record[5]==record[3]^255
-            and record[6]==record[4]^255)
+    if len(record)<8 or record[:2]!=[0x52,0x33] or record[7]!=0xA5:return False
+    if record[3]>=64 or record[4]>=4 or record[5]!=record[3]^255 or record[6]!=record[4]^255:return False
+    if record[2]==1:return True
+    if record[2]!=2 or len(record)!=16:return False
+    return all(record[index]<limit and record[index+4]==record[index]^255 for index,limit in [(8,4),(9,3),(10,2),(11,4)])
 
 
 def expected(case):
     mode,lock,scan,task=(case.get(k,v) for k,v in [('mode',1),('lock',0),('scan',0),('task',3)])
     flags=case.get('flags',0);reg7=case.get('reg7',0xA1)
-    record=list(case.get('stored',[0]*8))
+    record=normalized_record(case.get('stored',[0]*8))
+    loaded=valid_record(record)
+    scan_cfg=record[8:12] if loaded and record[2]==2 else [1,1,1,0]
+    scanner=None;scanner_case=None;scanner_ops=[]
     pref=case.get('pref_reg',record[3] if valid_record(record) else reg7&63)
     timeout=case.get('timeout',record[4] if valid_record(record) else 0)
     idle=case.get('idle',0);nv_dirty=case.get('nv_dirty',0);save_ticks=case.get('save_ticks',0)
@@ -194,12 +215,12 @@ def expected(case):
     def commit():
         nonlocal nv_dirty,record,saves
         if nv_dirty:
-            if not valid_record(record) or record[3:5]!=[pref,timeout]:
-                record=[0x52,0x33,1,pref,timeout,pref^255,timeout^255,0xA5];saves+=1
+            if not valid_record(record) or record[2]!=2 or record[3:5]!=[pref,timeout] or record[8:12]!=scan_cfg:
+                record=[0x52,0x33,2,pref,timeout,pref^255,timeout^255,0xA5,*scan_cfg,*[x^255 for x in scan_cfg]];saves+=1
             nv_dirty=0
     def close():
         nonlocal flags,dirty
-        commit();flags&=0xF2;dirty=1
+        commit();flags&=0xC2;dirty=1
     for msg in messages:
         output=msg;handled=False;done=False;action=0;auto=False
         physical=0<msg<0xE0
@@ -214,6 +235,7 @@ def expected(case):
                 if physical:
                     block=0 if release(msg) else 1;last=msg&31
                     handled=done=True
+        if not done and msg==0xFE:dirty=1
         if not done and safe:
             if msg==0xFE and not flags&n.MENU:
                 if nv_dirty:
@@ -226,9 +248,18 @@ def expected(case):
             elif msg not in (0,0xFE,0xF8):
                 idle=0
                 if not lock:
-                    if msg==n.LONG_MENU:
+                    if flags&n.SCAN_UI:
+                        from verify_radio_scan import model as scan_model
+                        scanner_ops.append(dict(key=msg,lock=lock))
+                        scanner=scan_model(dict(scanner_case,ops=scanner_ops))[-1]
+                        flags=scanner['flags'];scan_cfg[:]=[scanner['threshold'],scanner['dwell'],scanner['direction'],scanner['range']]
+                        nv_dirty|=scanner['nv'];dirty=1
+                        if not flags&n.SCAN_UI or msg==n.LONG_SCREEN:commit()
+                        if msg==n.LONG_SCREEN:action=5
+                        elif msg&31>=0x16 and msg<0xF8:action=7
+                    elif msg==n.LONG_MENU:
                         if flags&n.MENU:close()
-                        else:flags=(flags&0xF2)|n.MENU
+                        else:flags=(flags&0xC2)|n.MENU
                         block=1;last=n.LONG_MENU&31;action=7
                     elif flags&n.MENU:
                         if msg==0x96:close();action=7
@@ -239,6 +270,12 @@ def expected(case):
                             action=7
                         elif msg==0x9C:close();action=5
                         elif msg==0x9D:close();action=6
+                        elif msg==0x9E:
+                            from verify_radio_scan import model as scan_model
+                            flags=(flags&0xC2)|n.MENU|n.SCAN_UI
+                            scanner_case=dict(mode=mode,freq=case.get('freq',953),mw10=case.get('mw10',0),
+                                              threshold=scan_cfg[0],dwell=scan_cfg[1],direction=scan_cfg[2],range=scan_cfg[3])
+                            scanner_ops=[];scanner=scan_model(scanner_case)[0];action=7
                         elif flags&n.HELP:action=7
                         elif msg in (0x97,0x98,0x99,0x9A):action=msg-0x96 if mode==1 else 7
                         elif msg&31>=0x16:action=7
@@ -255,26 +292,27 @@ def expected(case):
                 before=reg7
                 if msg==n.LONG_DIAG or flags&1 and msg==n.SHORT_3:
                     flags^=1;handled=True
+                elif flags&1 and msg==0x9D:
+                    flags^=n.GRAPH;handled=True
+                elif flags&1 and flags&n.GRAPH and msg==0x96:
+                    handled=True
                 elif msg==n.LONG_SCREEN or flags&1 and msg==n.SHORT_4:
                     saved_count,saved_level=count,level
                     flags|=2;block=0 if release(msg) else 1;last=msg&31
                     count,level=0,32;commands += [0xAE,0x28];handled=True
                 elif mode==1 and (action==1 or msg==n.LONG_BW or flags&1 and msg==n.SHORT_1):
-                    reg7=(reg7&0xFC)|((reg7-1)&3);writes+=1;popups+=1;handled=True
+                    reg7=(reg7&0xFC)|((reg7-1)&3);writes+=1;handled=True
                 elif mode==1 and (action==2 or msg==n.LONG_MONO or flags&1 and msg==n.SHORT_2):
                     reg7=(reg7&0xF3)|(0 if reg7&4 else 4)
-                    if not flags&n.MENU:flags|=1
                     writes+=1;handled=True
                 elif mode==1 and (action==3 or msg==n.LONG_BASS or flags&1 and msg==n.SHORT_5):
                     reg7^=16
-                    if not flags&n.MENU:flags|=1
                     writes+=1;handled=True
                 elif mode==1 and (action==4 or msg==n.LONG_DE or flags&1 and msg==n.SHORT_6):
                     reg7^=32
-                    if not flags&n.MENU:flags|=1
                     writes+=1;handled=True
                 elif (action or flags&1) and 0x80<=msg<0xC0:
-                    flags&=0xF2
+                    flags&=0xC2
                 elif flags&1 and msg in (0xF8,0xFE):dirty=1
                 if before!=reg7:
                     pref=reg7&63;nv_dirty=1;save_ticks=0
@@ -283,31 +321,27 @@ def expected(case):
             flags&=0xF0;commands += [0x2F,0xAF];dirty=1
             count,level=saved_count,saved_level
         elif flags&2:count,level=0,32
-        elif not safe:flags&=0xF2
+        elif not safe:flags&=0xC2
         else:
             if mode==1 and reg7&63!=pref:
                 reg7=reg7&0xC0|pref;writes+=1;dirty=1
-            if flags&0x0D and dirty:frames+=1;dirty=0
+            if case.get('draw_hook') and case.get('stock_redraw',1):dirty=1
+            if dirty:frames+=1;dirty=0
     return dict(flags=flags,message=output,reg7=reg7,writes=writes,
-                frame=bool(frames and flags&0x0D and not flags&2),frames=frames,popups=popups,
+                frame=bool(frames and safe and not flags&2),frames=frames,popups=popups,
                 commands=commands,block=block,last=last,bl_count=count,bl_level=level,
-                pref=pref,timeout=timeout,idle=idle,nv_dirty=nv_dirty,saves=saves,record=record)
+                pref=pref,timeout=timeout,idle=idle,nv_dirty=nv_dirty,saves=saves,record=record,scan_cfg=scan_cfg,scanner=scanner,
+                tunes=scanner['tunes'] if scanner else 0)
 
 
 def frame_lines(case, state):
     mode, flags = state[n.MODE], state[n.FLAGS]
+    if flags&n.SCAN_UI:
+        from verify_radio_scan import screen_lines
+        return screen_lines(state)
     if flags&n.MENU:
-        if flags&n.HELP:
-            return ['KEYS / '+n.VERSION,'HOLD 1:FM BANDWIDTH','HOLD 2:SIGNAL DISPLAY',
-                    'HOLD 3:FM AUTO/MONO','HOLD 4:SCREEN OFF','HOLD 6:DE 7:BASS',
-                    'HOLD 8:SETTINGS','9:BACK 0:SAVE/EXIT']
-        pref=state[n.PREF_REG];timeout=state[n.TIMEOUT]
-        return ['SETTINGS '+n.VERSION,f'1 FM BW:{[150,200,50,100][pref&3]}KHZ',
-                '2 '+('MONO' if pref&4 else 'AUTO')+' 3 BASS:'+('ON' if pref&16 else 'OFF'),
-                '4 DE-EMPHASIS:'+('50US' if pref&32 else '75US'),
-                '5 SCREEN SLEEP:'+(['OFF','10S','30S','60S'][timeout]),
-                '6 SCREEN OFF 7 SIGNAL','0 SAVE/EXIT 9 HELP',
-                'CHANGES NOT SAVED' if state[n.NV_DIRTY] else 'SAVED / NO CHANGES']
+        from verify_radio_ui import settings_lines
+        return settings_lines(state)
     freq = state[n.FREQ] | state[n.FREQ + 1] << 8
     rf = state[n.RF] if state[n.RF] < 128 else state[n.RF] - 256
     offset = state[n.METRICS + 6]
@@ -319,12 +353,12 @@ def frame_lines(case, state):
         band = f'BW:{bw}KHZ ' + ('MONO' if state[n.REG7] & 4 else 'AUTO')
         offset_text = str(offset)
         stereo = str(int(bool(state[n.METRICS + 3] & 128)))
-        footer = '1BW 2MO 3X 4OFF 5B 6D'
+        footer = '3 EXIT 7 GRAPH 4 OFF'
     else:
         header = ('MW ' if mode == 2 else 'AM ') + f'{freq}KHZ'
         band = 'AM SIGNAL MONITOR'
         offset_text = ('-' if offset < 0 else '') + f'{abs(offset) // 10}.{abs(offset) % 10}'
-        stereo, footer = '-', '3:EXIT 4:SCREEN OFF'
+        stereo, footer = '-', '3 EXIT 7 GRAPH 4 OFF'
     return [header,
             f'C/N:{state[n.CN]}DB ' + ('LOCK' if state[n.METRICS] & 32 else '----'),
             f'RF~{rf}DBUV R:{state[n.METRICS + 7] & 127}',
@@ -350,6 +384,9 @@ def run_batch(cases, candidate=None):
     disp, _ = n.renderer(DISPLAY_BASE)
     prefs,_=n.settings(SETTINGS_BASE)
     menu,_=n.menu_renderer(MENU_BASE)
+    extra=[(GRAPH_BASE,history_control(GRAPH_BASE)[0]),(GRAPH_DISPLAY_BASE,graph_renderer(GRAPH_DISPLAY_BASE)[0]),
+           (HOME_BASE,home_renderer(HOME_BASE)[0]),(SCAN_BASE,scan_control(SCAN_BASE)[0]),
+           (SCAN_DISPLAY_BASE,scan_renderer(SCAN_DISPLAY_BASE)[0])]
     bw, _ = bandwidth_handler()
     service, services = shim()
     # Execute the emitted call-site bytes as well as the generated bank code.
@@ -362,11 +399,16 @@ def run_batch(cases, candidate=None):
                            (n.DISPLAY_FLASH,n.renderer()[0]),
                            (0x3000+n.SETTINGS_BANK*0x800,n.settings()[0]),
                            (0x3000+n.MENU_BANK*0x800,n.menu_renderer()[0]),
-                           (0x11EB0,bw)]:
+                           (0x11EB0,bw),
+                           (0x3000+n.GRAPH_BANK*0x800,history_control()[0]),
+                           (0x3000+n.GRAPH_DISPLAY_BANK*0x800,graph_renderer()[0]),
+                           (0x3000+n.HOME_BANK*0x800,home_renderer()[0]),
+                           (0x3000+n.SCAN_BANK*0x800,scan_control()[0]),
+                           (0x3000+n.SCAN_DISPLAY_BANK*0x800,scan_renderer()[0])]:
             if candidate[start:start+len(code)]!=code:
                 raise ValueError(f'candidate machine code differs at {start:#x}')
         for name,pc,length,wrapper in [('init',0x4A12,6,0x7100),
-                                       ('wait',0x4A62,3,0x7110),
+                                       ('draw',0x4A5F,3,0x7130),('wait',0x4A62,3,0x7110),
                                        ('message',0x4A65,3,0x7120)]:
             offset=0x1D800+pc-0x4000
             hooks.append((wrapper,bytes(candidate[offset:offset+length])+b'\x22'))
@@ -377,8 +419,8 @@ def run_batch(cases, candidate=None):
         a.movdi(0xD0, 0)
         n.write(a,0x3BE2,0x40);n.write(a,0x3BE3,0x13)
         n.write(a,0x3B3A,case.get('reg7',0xA1))
-        stored=list(case.get('stored',[0]*8));loaded=valid_record(stored)
-        for k,value in enumerate(case.get('stored',[0]*8)):n.write(a,0x7E00+k,value)
+        stored=normalized_record(case.get('stored',[0]*8));loaded=valid_record(stored)
+        for k,value in enumerate(stored):n.write(a,0x7E00+k,value)
         a.emit(0x12, entries['init'] >> 8, entries['init'] & 255)
         for suffix, addr, count, value in [('logs', 0x7000, 32, 0), ('frame', FRAME, 0, 0x5A)]:
             a.movdptr(addr)
@@ -410,10 +452,12 @@ def run_batch(cases, candidate=None):
                             (0x3B3A, regs[7]), (0x3CDC, case.get('freq', 953) & 255),
                             (0x3CDD, case.get('freq', 953) >> 8),
                             (0x27FF, 0xA5), (0x2900, 0xB6),
-                            (n.STATE-1, 0xC7), (n.STATE+64, 0xD8)]:
+                            (n.STATE-1, 0xC7), (n.STATE+n.STATE_SIZE, 0xD8)]:
             n.write(a, addr, value)
         a.movri(0, 0x18)
         a.emit(0x76, case.get('mode', 1))
+        a.movri(0,0x8B);a.emit(0x76,case.get('mw10',0))
+        n.write(a,0x3AAC,0)
         a.movri(0, 0x8C)
         a.emit(0x76, case.get('lock', 0))
         a.movdi(0x9C, case.get('pcon1', 0))
@@ -429,66 +473,46 @@ def run_batch(cases, candidate=None):
             a.movdptr(0x7040)
             for source in [2,3,4,5,6,7,0xF0,0x81]:
                 a.movad(source);a.movxda();a.emit(0xA3)
+            if case.get('draw_hook'):
+                n.write(a,0x3CD1,case.get('stock_redraw',1))
+                a.emit(0x12,entries['draw']>>8,entries['draw']&255)
             a.emit(0x12,entries['wait']>>8,entries['wait']&255)
         for source,dest in [(0x3B71,0x7009),(0x3B72,0x700A),(0x7F07,0x700C),(0x3B3A,0x700D)]:
             n.read(a,source);a.movdptr(dest);a.movxda()
         a.movad(0x90);a.anlai(32);a.movdptr(0x700B);a.movxda()
         out = 0xA000 + index * RECORD
-        for source, length in [(n.STATE, 64), (0x7000, 32), (0x7040, 8),
-                               (0x27FF, 1), (0x2900, 1), (n.STATE-1, 1), (n.STATE+64, 1),
+        for source, length in [(n.STATE, n.STATE_SIZE), (0x7000, 32), (0x7040, 8),
+                               (0x27FF, 1), (0x2900, 1), (n.STATE-1, 1), (n.STATE+n.STATE_SIZE, 1),
                                (FRAME, 1024)]:
-            for k in range(length):
-                n.read(a, source+k)
-                a.emit(0xFC)
-                a.movdptr(out)
-                a.movar(4)
-                a.movxda()
-                out += 1
+            copy_xram(a,source,out,length,f'copy{index}_{source}_{out}')
+            out+=length
         # Pad the fixed record tail to RECORD bytes.
         for address in range(out, 0xA000 + (index+1)*RECORD):
             n.write(a, address, 0)
     stop = a.base + len(a.code)
     a.emit(0x80, 0xFE)
-    if len(a.code) + a.base > 65536:
+    if len(a.code) + a.base > SCAN_BASE:
         raise ValueError('test wrapper too big; reduce batch')
     chunks = [(n.COMMON_PC, glue), (CTL_BASE, ctl), (DISPLAY_BASE, disp), (0x1EB0, bw),
               (0x100, bytes.fromhex('d0 e0 22')), (0x133, bytes([2, SHIM >> 8, SHIM & 255])),
               (0x20B1, bytes([2, services['get_msg'] >> 8, services['get_msg'] & 255])),
               (0x42DB, bytes([2, services['stock_key'] >> 8, services['stock_key'] & 255])),
               (0x2054, bytes([2, services['delay'] >> 8, services['delay'] & 255])),
+              (0x4184,bytes([2,services['stock_draw']>>8,services['stock_draw']&255])),
               (0x208A,bytes([2,services['pref_read']>>8,services['pref_read']&255])),
               (SETTINGS_BASE,prefs),(MENU_BASE,menu),
-              (SHIM, service), (a.base, a.assemble()), *hooks]
-    with tempfile.TemporaryDirectory(prefix='v115-native-') as directory:
-        path = Path(directory) / 'run.hex'
-        path.write_text(intel_hex(chunks))
-        end = 0xA000 + len(cases)*RECORD - 1
-        commands = f'file "{path}"\nrun {a.base:#x} {stop:#x}\ndump /h xram 0xa000 {end:#x} 32\nquit\n'
-        result = subprocess.run([executable('s51'),'-b','-q','-t','C52','-c','-'],
-                                input=commands,text=True,capture_output=True,timeout=60,check=True)
-    output = bytearray(len(cases)*RECORD)
-    seen = set()
-    for line in result.stdout.splitlines():
-        match = re.match(r'^0x([0-9a-fA-F]+)\s+((?:[0-9a-fA-F]{2}(?:\s+|$))+)',line)
-        if not match:
-            continue
-        offset = int(match[1],16)-0xA000
-        if not 0 <= offset < len(output):
-            continue
-        row = bytes.fromhex(match[2])[:min(32,len(output)-offset)]
-        output[offset:offset+len(row)] = row
-        seen.update(range(offset,offset+len(row)))
-    if len(seen) != len(output):
-        raise ValueError('incomplete native emulator output: '+result.stdout[-1000:])
-    return [bytes(output[i*RECORD:(i+1)*RECORD]) for i in range(len(cases))]
+              (SHIM, service), (a.base, a.assemble()), *extra, *hooks]
+    output=emulate(chunks,a.base,stop,0xA000,len(cases)*RECORD,timeout=60)
+    return [output[i*RECORD:(i+1)*RECORD] for i in range(len(cases))]
 
 
 def check(case, result):
     want = expected(case)
-    state, logs = result[:64], result[64:96]
+    size=n.STATE_SIZE
+    state,logs=result[:size],result[size:size+32]
     if (state[n.PREF_REG],state[n.TIMEOUT],state[n.IDLE],state[n.NV_DIRTY],logs[14]) != (want['pref'],want['timeout'],want['idle'],want['nv_dirty'],want['saves']):
         raise ValueError(f'preferences mismatch: {case}: {state.hex()}, {logs.hex()}, {want}')
-    if list(state[n.PREF_RECORD:n.PREF_RECORD+8])!=want['record']:
+    if list(state[n.PREF_RECORD:n.PREF_RECORD+n.PREF_SIZE])!=want['record']:
         raise ValueError(f'stored preferences mismatch: {case}: {state.hex()}, {want}')
     if logs[0]:
         raise ValueError(f'native ABI error {logs[0]}: {case}')
@@ -507,12 +531,15 @@ def check(case, result):
         raise ValueError(f'wake gesture mismatch: {case}: {state.hex()}, {want}')
     if logs[9]!=want['bl_count'] or logs[11]!=want['bl_level']:
         raise ValueError(f'backlight state mismatch: {case}: {logs.hex()}, {want}')
+    if logs[4]!=want['tunes']:raise ValueError(f'scanner tune count mismatch: {case}, {logs.hex()}, {want}')
+    if logs[5]!=(len(case.get('messages',[0])) if case.get('draw_hook') and not (case.get('task',3)==3 and case.get('scan',0)==0 and case.get('mode',1) in (1,2,3)) else 0):
+        raise ValueError(f'native draw fallback mismatch: {case}, {logs.hex()}')
     if logs[1]!=want['frames']*2 or logs[3]!=want['frames']*4+want['popups']:
         raise ValueError(f'display/tuner traffic while asleep or render count mismatch: {case}: {logs.hex()}, {want}')
-    if result[96:104] != bytes([0x22,0x23,0x24,0x25,0x26,0x27,0x77,0x8F]):
-        raise ValueError(f'CPU context mismatch: {case}: {result[96:104].hex()}')
-    if result[104:108] != bytes([0xA5,0xB6,0xC7,0xD8]):
-        raise ValueError(f'buffer/state bounds violated: {case}: {result[104:108].hex()}')
+    if result[size+32:size+40] != bytes([0x22,0x23,0x24,0x25,0x26,0x27,0x77,0x8F]):
+        raise ValueError(f'CPU context mismatch: {case}: {result[size+32:size+40].hex()}')
+    if result[size+40:size+44] != bytes([0xA5,0xB6,0xC7,0xD8]):
+        raise ValueError(f'buffer/state bounds violated: {case}: {result[size+40:size+44].hex()}')
     if want['frame']:
         regs = case.get('regs', [0]*28)
         gain_rf, gain_if = (regs[24] >> 5) & 7, (regs[24] >> 2) & 7
@@ -523,10 +550,17 @@ def check(case, result):
             raise ValueError(f'signal arithmetic mismatch: {case}: {state.hex()}')
         if (state[n.VOLTAGE] | state[n.VOLTAGE+1]<<8) != voltage:
             raise ValueError('voltage arithmetic mismatch')
-        frame = result[108:1132]
-        lines = frame_lines(case, state)
-        if frame != reference_frame(lines):
-            first = next(i for i,(x,y) in enumerate(zip(frame,reference_frame(lines))) if x!=y)
+        frame = result[size+44:size+44+1024]
+        if state[n.FLAGS]&n.SCAN_UI or state[n.FLAGS]&n.MENU or state[n.FLAGS]&1 and not state[n.FLAGS]&n.GRAPH:
+            lines=frame_lines(case,state);pixels=reference_frame(lines)
+        elif state[n.FLAGS]&n.GRAPH and state[n.FLAGS]&1:
+            from verify_signal_graph import graph_frame
+            lines=['C/N history'];pixels=graph_frame(state)
+        else:
+            from verify_radio_ui import home_frame
+            lines=['Large radio home'];pixels=home_frame(state,case.get('mw10',0))
+        if frame!=pixels:
+            first=next(i for i,(x,y) in enumerate(zip(frame,pixels)) if x!=y)
             raise ValueError(f'framebuffer mismatch at {first}: {lines}; state={state.hex()}')
         return frame, lines
     return None
@@ -538,13 +572,13 @@ def verify_lcd_guard(candidate):
     guard=bytes([0x12,labels['lcd_guard']>>8,labels['lcd_guard']&255,0,0,0])
     if candidate[0x402B:0x4031]!=guard:
         raise ValueError('final image is missing the LCD transfer guard')
-    cases=[(flags,page) for flags in (0,2) for page in range(256)]
+    cases=[(flags,owned,painting,page) for flags in (0,2) for owned in (0,1) for painting in (0,1) for page in range(256)]
     for first in range(0,len(cases),128):
         batch=cases[first:first+128]
         a=Asm(0x8000)
-        for index,(flags,page) in enumerate(batch):
+        for index,(flags,owned,painting,page) in enumerate(batch):
             a.movdi(0x81,0x60);a.movdi(0xD0,0)
-            n.write(a,n.STATE+n.FLAGS,flags);n.write(a,0x7000,0)
+            n.write(a,n.STATE+n.FLAGS,flags);n.write(a,n.STATE+n.UI_ACTIVE,owned);n.write(a,n.STATE+n.UI_PAINT,painting);n.write(a,0x7000,0)
             a.movdi(0xD8,0xA5);a.movdi(0xF0,0x55)
             a.movri(1,31);a.movri(2,page);a.movdptr(0x5A5A)
             a.emit(0x12,0x18,0x2B)
@@ -569,33 +603,22 @@ def verify_lcd_guard(candidate):
             m=re.match(r'^0x([0-9a-fA-F]+)\s+((?:[0-9a-fA-F]{2}(?:\s+|$))+)',line)
             if m:
                 for offset,value in enumerate(bytes.fromhex(m[2])[:32]):found[int(m[1],16)+offset]=value
-        for index,(flags,page) in enumerate(batch):
+        for index,(flags,owned,painting,page) in enumerate(batch):
             result=bytes(found[0xA000+index*8+k] for k in range(8))
-            active=not flags&2 and page<8
+            active=not flags&2 and (not owned or painting) and page<8
             want=bytes([int(active),31,page,0x55,0xA5,0x60,
                         0 if active else 0x5A,0x70 if active else 0x5A])
             if result!=want:raise ValueError(f'LCD guard failed for {flags=}, {page=}: {result.hex()}')
     return len(cases)
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--report', type=Path, default=ROOT/'build/native-features-emulation.json')
-    p.add_argument('--smoke', action='store_true')
-    p.add_argument('--candidate',type=Path,help='also verify and execute hooks from this final image')
-    args = p.parse_args()
-    candidate_raw=args.candidate.read_bytes() if args.candidate else None
-    candidate=decode(candidate_raw) if candidate_raw is not None else None
-    source_hashes={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in
-                   ('native_features.py','bandwidth_patch.py','verify_native_features.py','lcd_draw.py','assets/font-5x8.bin')}
-    components={name:hashlib.sha256(fn()[0]).hexdigest() for name,fn in
-                [('common',n.common_glue),('control',n.control),('display',n.renderer),('settings',n.settings),('menu',n.menu_renderer),('bandwidth',bandwidth_handler)]}
+def all_cases(smoke=False):
     regs = [0]*28
     regs[20:28] = [0xEA,0x34,0x80|9,0x80|14,0x32,30,0xF2,14]
     cases = [dict(flags=1,dirty=1,regs=regs),
              dict(mode=2,flags=1,dirty=1,freq=999,regs=regs),
              dict(mode=3,flags=1,dirty=1,freq=30000,regs=regs)]
-    if not args.smoke:
+    if not smoke:
         cases += [dict(msg=msg,flags=flags,mode=mode) for msg in range(256)
                   for flags in (0,1,2,3) for mode in (1,2,3)]
         cases += [dict(msg=msg,mode=mode,lock=lock,scan=scan,task=task,flags=1)
@@ -648,15 +671,51 @@ def main():
         ]
         cases += [dict(mode=mode,messages=messages,stored=stored)
                   for mode in (1,2,3) for messages in edits for stored in ([0]*8,valid)]
+        cases += [dict(msg=msg,flags=flags,mode=mode) for msg in range(256)
+                  for flags in (1|n.GRAPH,3|n.GRAPH) for mode in (1,2,3)]
+        cases += [dict(mode=mode,flags=0,dirty=1,regs=regs,freq=freq,mw10=mw10)
+                  for mode,freq,mw10 in [(1,953,0),(2,999,0),(2,1000,1),(3,30000,0)]]
+        cases += [dict(draw_hook=True,stock_redraw=redraw,mode=mode,task=task,scan=scan,flags=flags)
+                  for mode,task,scan in [(1,3,0),(2,3,0),(3,3,0),(1,2,0),(2,3,1),(0,3,0)]
+                  for flags in (0,1,1|n.GRAPH,n.MENU) for redraw in (0,1)]
+        from itertools import product
+        def v2(config):return [0x52,0x33,2,0x21,1,0xDE,0xFE,0xA5,*config,*[value^255 for value in config]]
+        cases += [dict(stored=v2(config),flags=n.MENU,msg=0x9E) for config in product(range(4),range(3),range(2),range(4))]
+        scan_sequences=[
+            [n.LONG_MENU,0xDE,0x9E,0x98,0x99,0x9A,0x9E,0x96],
+            [n.LONG_MENU,0xDE,0x9E,0x9B,0x9B,0x9B,0x9C,0x96],
+            [n.LONG_MENU,0xDE,0x9E,n.LONG_SCREEN,0xDA,0x57,0x97,0x96],
+            [n.LONG_MENU,0xDE,0x9E,0x9D,0x89],
+            [n.LONG_MENU,0xDE,0x9E,0x9D,n.LONG_MENU,n.LONG_MENU,0xDE],
+        ]
+        cases += [dict(mode=mode,freq=freq,messages=messages,stored=stored)
+                  for mode,freq in [(1,953),(2,999),(3,10000)] for messages in scan_sequences
+                  for stored in ([0]*8,v2([1,1,1,0]))]
+    return cases
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--report', type=Path, default=ROOT/'build/native-features-emulation.json')
+    p.add_argument('--smoke', action='store_true')
+    p.add_argument('--candidate',type=Path,help='also verify and execute hooks from this final image')
+    args = p.parse_args()
+    candidate_raw=args.candidate.read_bytes() if args.candidate else None
+    candidate=decode(candidate_raw) if candidate_raw is not None else None
+    source_hashes={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in
+                   ('native_features.py','bandwidth_patch.py','verify_native_features.py','lcd_draw.py','native_ui.py','radio_ui.py','signal_graph.py','radio_scan.py','emulation.py','assets/font-5x8.bin')}
+    components={name:hashlib.sha256(fn()[0]).hexdigest() for name,fn in
+                [('common',n.common_glue),('control',n.control),('display',n.renderer),('settings',n.settings),('menu',n.menu_renderer),
+                 ('history',history_control),('graph',graph_renderer),('home',home_renderer),('scanner',scan_control),('scanner_display',scan_renderer),('bandwidth',bandwidth_handler)]}
+    cases=all_cases(args.smoke)
     frames = []
-    for i, case in enumerate(cases):
-        # The wrapper copies a full frame; one case stays well inside CODE 64K.
-        output = run_batch([case],candidate)[0]
-        frame = check(case, output)
-        if frame and len(frames)<3:
-            frames.append(frame)
-        if i and i % 200 == 0:
-            print(f'{i}/{len(cases)} native cases passed',flush=True)
+    for start in range(0,len(cases),4):
+        batch=cases[start:start+4]
+        outputs=run_batch(batch,candidate)
+        for case,output in zip(batch,outputs):
+            frame=check(case,output)
+            if frame and len(frames)<3:frames.append(frame)
+        if start and start%200==0:print(f'{start}/{len(cases)} native cases passed',flush=True)
     if any(hashlib.sha256((ROOT/name).read_bytes()).hexdigest()!=sha for name,sha in source_hashes.items()):
         raise ValueError('implementation source changed during verification')
     report = dict(machine_code_cases_passed=len(cases),source_sha256=source_hashes,
@@ -670,8 +729,10 @@ def main():
                           'full wake gestures consumed, hold repeats and system/timer events',
                           'settings/help framebuffer pixels and all menu key events in FM/MW/SW',
                           'persistent record validation, all 64 FM preferences and four timeout choices',
-                          'native settings ABI, bounded eight-byte record and save readback',
-                          'deferred shortcut saving, unchanged preferences skip writes, automatic sleep boundaries'],
+                          'native settings ABI, legacy migration and bounded sixteen-byte save/readback',
+                          'deferred shortcut saving, unchanged preferences skip writes, automatic sleep boundaries',
+                          'large home screen, graph switching, native draw ownership and fallback',
+                          'scanner menu transitions, pause/resume, sleep and saved scan options'],
                   scope='Actual new instructions run at relocated bank addresses; native I2C/LCD/message services are instrumented. Full stock runtime and RF hardware are not emulated.')
     if candidate_raw is not None:
         report['candidate_sha256']=hashlib.sha256(candidate_raw).hexdigest()
