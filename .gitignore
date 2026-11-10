@@ -29,6 +29,8 @@
 *.wav
 !assets/font-5x8.bin
 !assets/ui-preview.png
+!assets/IMG_20261110_093107.jpg
+!assets/IMG_20261110_093115.jpg
 
 # Local environments and credentials
 __pycache__/

@@ -26,6 +26,12 @@ RC3 has passed instruction emulation, LCD rendering from RAM, and verified USB
 programming on matching hardware. Cold-boot checks of RC3 preferences and
 actual automatic-sleep timing on the installed radio are still pending.
 
+## On the radio
+
+| RC3 startup | Settings menu |
+| :---: | :---: |
+| <img src="assets/IMG_20261110_093107.jpg" alt="Retekess V115 showing the custom firmware 1.5-RC3 welcome screen" width="330"> | <img src="assets/IMG_20261110_093115.jpg" alt="Retekess V115 showing the RC3 settings menu" width="330"> |
+
 ## Controls
 
 Use these shortcuts during idle radio playback with the keypad unlocked.
