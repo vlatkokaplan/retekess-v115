@@ -37,6 +37,79 @@ suite and was flashed with two matching full-image readbacks, preserving the boo
 area, settings, and station lists. Normal-boot frequency-entry/volume acceptance
 is pending. Instruction tests use instrumented board services.
 
+## Source-built radio prototype
+
+**OPEN-0.1** is the first step toward a replacement radio application. The C
+sources in [`firmware/`](firmware/) implement the interface, frequency editor,
+key filtering, and AKC6955, LCD, ADC, and audio drivers. They call no stock
+application functions. [`radio_audio.py`](radio_audio.py) assembles bounded
+8051 startup programs for DAC calibration before the C application is uploaded.
+The prototype uses the existing USB loader and its CPU
+initialization; a connected computer paces bounded application ticks. It is
+not yet an autonomous boot image.
+
+The RAM executable is about **5.4 KiB**, with 73 bytes of application state,
+a 128-byte LCD page buffer, and compiler scratch space. Its upload window is
+checked against the loader's memory allocation. Every uploaded block is read
+back, and each call preserves the loader's registers and interrupt state.
+`run_radio.py` exposes RAM upload and execution only; it does not program SPI
+flash. Restarting the radio returns to the installed firmware.
+
+Install [SDCC](https://sdcc.sourceforge.net/) (tested with 4.2.0) and uCsim `s51`,
+then build and verify with:
+
+```sh
+make radio-build
+make radio-verify
+```
+
+Set `SDCC`, `SDLD`, or `S51` to executable paths when they are not on `PATH`.
+With the radio connected in loader mode and USB access configured as described
+below, run:
+
+```sh
+python3 run_radio.py --self-test --seconds 120
+```
+
+The self-test injects labeled synthetic key events and checks actual tuner
+channel readback through FM entry, 25 kHz steps, MW, SW, and band switching.
+During the following interactive period, physical keys are read and handled
+on the radio. Keep USB connected. The program normally mutes audio on exit;
+`--leave-audio` keeps the last tuner state, while controls stop when the host
+loop ends. State and test reports are written under ignored `build/`.
+
+| Prototype key | Action |
+| --- | --- |
+| **0–9**, then **Play/Pause** | Enter frequency: `953` = FM 95.300 MHz; AM uses kHz |
+| **Delete** | Remove an entered digit |
+| **FM/AM** / **SW** | Switch FM/MW / select SW-mode AM |
+| **Previous / Next** | Tune by 25 kHz FM, 9 kHz MW, or 5 kHz SW |
+| **Volume − / +** | Adjust volume; holding repeats |
+| **Play/Pause** outside entry | Mute/unmute |
+| **Menu** | Cancel entry, or switch off the LCD and backlight |
+| **Any key** while asleep | Wake the screen; release before the next action |
+| **Power** | Exit the RAM test |
+
+Tuning stays muted until the returned channel matches the requested channel;
+stale completion flags are rejected and a timeout remains muted. The tuner
+spacing register is set to 25 kHz: live measurements with the original
+100 kHz setting rounded fine manual tunes to the coarser grid.
+
+Instruction tests execute the compiled application with simulated board
+services, checking exact screen pixels, frequency boundaries and overflow,
+debouncing, mute/sleep, stale status, timeouts, and loader context preservation.
+There are 47 application cases, three cases executing the real GPIO
+initialization, and a DAC startup context/timeout check. The GPIO tests cover
+clearing loader-enabled key pull-ups while preserving other pins; the LCD test
+checks that an absent SPI completion flag returns an error within its limit.
+Live USB tests have verified FM/MW/SW channel readback. The display, physical
+frequency entry, controls, and headphone station audio have been confirmed on
+the radio. Speaker audio and autonomous cold startup remain unverified.
+Presets, scanning,
+persistent settings, recording, USB playback, and autonomous startup have not
+been implemented in this prototype. The RC6 features and controls below apply
+to the separately installed patched firmware.
+
 ## On the radio
 
 | RC3 startup | Settings menu |

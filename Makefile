@@ -2,7 +2,7 @@ PYTHON ?= python3
 SOURCE ?= stock.bin
 IMAGE ?= build/v115-full-features-rc6.bin
 
-.PHONY: references build verify smoke clean
+.PHONY: references build verify smoke clean radio-build radio-verify radio-run
 
 references:
 	$(PYTHON) fetch_references.py --firmware
@@ -14,6 +14,15 @@ $(IMAGE):
 
 smoke: $(IMAGE)
 	$(PYTHON) verify_native_features.py --smoke --candidate "$(IMAGE)" --report build/smoke.json
+
+radio-build:
+	$(PYTHON) build_radio.py
+
+radio-verify:
+	$(PYTHON) verify_radio.py
+
+radio-run: radio-build
+	$(PYTHON) run_radio.py --self-test
 
 verify: $(IMAGE)
 	$(PYTHON) verify_band_patch.py "$(IMAGE)"
