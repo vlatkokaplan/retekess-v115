@@ -4,7 +4,7 @@ Expanded tuning, signal history, configurable scanning, saved preferences, and
 screen sleep for the Retekess V115. This project patches a verified stock v1.4 image and
 assembles the added 8051 code directly in Python.
 
-**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.3.0 (experimental; installed: OPEN-0.2.6)**
+**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.3.0 (experimental; installed)**
 
 Linux development tools · 2 MiB SPI flash. The two images have separate build
 and installation commands; OPEN is a radio application with fewer features.
@@ -43,9 +43,13 @@ is pending. Instruction tests use instrumented board services.
 ## Autonomous source-built radio
 
 **OPEN-0.3.0** adds a graphical radio screen, a settings menu and the stock MP3
-player to the OPEN-0.2.6 radio described below. It is built and
-simulator-qualified but not yet installed. Previews rendered from the firmware's
-simulated LCD output are in `build/previews/open-0.3.0/`.
+player to the OPEN-0.2.6 radio described below. It was installed on 2026-11-24
+with two matching full-image readbacks, keeping the boot prefix and saved
+settings, and a first check on the radio looked fine. The previews below are the
+firmware's own LCD output from the instruction simulator: FM stereo, a weak FM
+station, frequency entry, MW, SW and the settings menu.
+
+![OPEN-0.3.0 radio screens and settings menu](assets/open-0.3.0-screens.png)
 
 - **Screen:** a status bar (band, five signal bars at 6 dB C/N steps, STEREO
   from AKC6955 register 23 bit 7 or forced MONO, speaker and volume), the
@@ -97,8 +101,9 @@ simulated LCD output are in `build/previews/open-0.3.0/`.
   to start at `0x1E800`, where the 6 KiB radio overlay overlaps it; it is copied
   unchanged to banks `0x2E`–`0x30` and its single loader repointed.
 
-Not yet confirmed on hardware: menu keys and drawing load bank `0x2C` from SPI
-flash while the radio's own peripheral setup is active. The stock loader
+What to watch on hardware: menu keys and drawing load bank `0x2C` from SPI
+flash while the radio's own peripheral setup is active; normal listening loads
+no banks. The stock loader
 CRC-checks each block and resets through the watchdog on failure, so a problem
 here shows up as a reboot when MENU or MODE is pressed, not as a write.
 
@@ -167,7 +172,7 @@ python3 flash_radio.py --baseline local/radio.bin \
 
 To install, use a new session directory and add `--write`. The writer accepts
 verified stock, RC6, reviewed OPEN-0.2 through 0.2.6, or this exact OPEN
-image. Updating from the installed OPEN-0.2.6 rewrites 12 sectors. It uses the existing sector writer, erase/program/restore trial,
+image. Updating from OPEN-0.2.6 rewrites 12 sectors. It uses the existing sector writer, erase/program/restore trial,
 rollback journal, and two complete installed-image readbacks. The first 8 KiB
 and current settings are protected.
 Boot-entry, 16 timer configurations, 188 application cases (88 for the menu,
@@ -197,9 +202,9 @@ audio muted, while checking the fixed tuner input level. It also checks
 zero-volume tuner mute, retuning, and standby/wake retention. Native timer
 batches and the full image/recovery model qualify each image before
 installation. Normal-boot listening acceptance remains necessary; register
-readback alone does not establish clean audio. OPEN-0.2.6 was installed with
+readback alone does not establish clean audio. OPEN-0.3.0 was installed with
 two matching full-image readbacks, preserving the boot prefix and saved
-settings; its normal-boot listening check is pending.
+settings.
 
 Qualify the volume driver and timer before auditing an installation image:
 

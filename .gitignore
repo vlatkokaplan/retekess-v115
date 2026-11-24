@@ -29,6 +29,7 @@
 *.wav
 !assets/font-5x8.bin
 !assets/ui-preview.png
+!assets/open-0.3.0-screens.png
 !assets/IMG_20261110_093107.jpg
 !assets/IMG_20261110_093115.jpg
 
