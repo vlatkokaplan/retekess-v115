@@ -45,7 +45,7 @@ is pending. Instruction tests use instrumented board services.
 **OPEN-0.3.0** adds a graphical radio screen, a settings menu and the stock MP3
 player to the OPEN-0.2.6 radio described below. It was installed on 2026-11-24
 with two matching full-image readbacks, keeping the boot prefix and saved
-settings, and a first check on the radio looked fine. The previews below are the
+settings. On the radio, MENU and MODE both work. The previews below are the
 firmware's own LCD output from the instruction simulator: FM stereo, a weak FM
 station, frequency entry, MW, SW and the settings menu.
 
@@ -101,11 +101,12 @@ station, frequency entry, MW, SW and the settings menu.
   to start at `0x1E800`, where the 6 KiB radio overlay overlaps it; it is copied
   unchanged to banks `0x2E`–`0x30` and its single loader repointed.
 
-What to watch on hardware: menu keys and drawing load bank `0x2C` from SPI
-flash while the radio's own peripheral setup is active; normal listening loads
-no banks. The stock loader
-CRC-checks each block and resets through the watchdog on failure, so a problem
-here shows up as a reboot when MENU or MODE is pressed, not as a write.
+Confirmed on hardware (2026-11-24): MENU and MODE work. Menu keys and drawing
+load bank `0x2C`, and MODE loads bank `0x2D` and the stock player's banks,
+from SPI flash while the radio's own peripheral setup is active. Normal
+listening loads no banks. The stock loader CRC-checks each block and resets
+through the watchdog on failure, so a fault here would show up as a reboot,
+never as a write.
 
 **OPEN-0.2.6** is the autonomous source-built radio, developed from the OPEN-0.1
 RAM prototype.
