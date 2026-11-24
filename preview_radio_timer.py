@@ -8,7 +8,7 @@ import signal
 import time
 
 from build_radio import ROOT
-from run_radio import upload,execute,select,state
+from run_radio import upload,execute,select,state,inject
 from usb_dump import RawTransport
 import radio_audio
 import radio_timer
@@ -19,6 +19,7 @@ def main():
     p.add_argument('--build',type=Path,default=ROOT/'build/radio-timer-preview')
     p.add_argument('--batches',type=int,default=6)
     p.add_argument('--report',type=Path,default=ROOT/'build/radio-timer-preview/hardware.json')
+    p.add_argument('--start-muted',action='store_true',help='keep the qualified timer run inaudible')
     a=p.parse_args()
     if not 1<=a.batches<=100:p.error('batches must be 1..100')
     m=json.loads((a.build/'radio.json').read_text());code=(a.build/'radio.bin').read_bytes()
@@ -33,7 +34,7 @@ def main():
     old=signal.signal(signal.SIGINT,interrupted)
     t=RawTransport();saved=None
     report=dict(flash_written=False,host_paces_ticks=False,application_sha256=m['sha256'],
-                audio_source_sha256=hashlib.sha256(Path(radio_audio.__file__).read_bytes()).hexdigest(),batches=[])
+                audio_source_sha256=hashlib.sha256(Path(radio_audio.__file__).read_bytes()).hexdigest(),starts_muted=a.start_muted,batches=[])
     try:
         report['loader_before']=t.identify();t.unlock()
         report['audio_initialization']=radio_audio.initialize(t)
@@ -42,6 +43,9 @@ def main():
         if saved[4]&0x30:saved=None;raise RuntimeError('Timer1 is already in use by the loader')
         for offset in range(0,len(code),512):upload(t,0x2400+offset,code[offset:offset+512].ljust(512,b'\0'))
         upload(t,0x2200,bytes(512));select(t,m,'app_init');execute(t)
+        if a.start_muted:
+            select(t,m,'app_tick');inject(t,m,2)
+            if state(t,m)['muted']!=1:raise RuntimeError('muted timer startup failed')
         data=bytearray(t.read_ram(0x2200,512));data[:128]=radio_timer.batch(m).ljust(128,b'\0');upload(t,0x2200,bytes(data))
         print(m['version']+' active; each USB call runs 256 hardware-timed native ticks.',flush=True)
         print('POWER: standby/wake. Keep USB connected during this RAM test.',flush=True)
@@ -52,6 +56,7 @@ def main():
             if (s['clock_ticks']-previous)&65535!=256:raise RuntimeError('native tick count mismatch')
             if not 4.8<=elapsed<=8:raise RuntimeError(f'native timer pace outside expected range: {elapsed:.3f}s')
             previous=s['clock_ticks'];sample=dict(batch=index+1,seconds=round(elapsed,3),**s)
+            if a.start_muted and not s['muted']:raise RuntimeError('timer run was unmuted')
             report['batches'].append(sample);print(json.dumps(sample),flush=True)
         report['completed']=True
     except Exception as exc:

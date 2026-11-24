@@ -11,6 +11,8 @@ u8 tuner_read(u8 reg) { return FAULT==1?255:REG[reg]; }
 void tuner_write(u8 reg,u8 value) {
     u8 previous=REG[reg];
     if(reg>=20) { radio.error|=ERR_I2C; return; }
+    if(reg==0) ++REG[24];
+    if(reg==6) ++REG[25];
     REG[reg]=value;
     /* Model a rising tune edge, including the chip's observed FM grid rounding. */
     if(reg==0 && (value&0x20) && !(previous&0x20) && FAULT!=2) {
@@ -21,7 +23,8 @@ void tuner_write(u8 reg,u8 value) {
 }
 void hardware_init(void) { KEY=BOOT_KEY; FAULT=0; REG[20]=0; REG[21]=0; REG[22]=7; REG[23]=0x80|18; }
 void hardware_audio(void) {}
-void hardware_amplifier(u8 enabled) { REG[31]=enabled; }
+void hardware_volume(u8 level) { REG[29]=level; }
+void hardware_amplifier(u8 enabled) { if(REG[31]!=enabled) ++REG[26]; REG[31]=enabled; }
 u8 hardware_key(void) { radio.adc1=255; radio.adc2=255; return KEY; }
 void lcd_power(u8 on) { REG[30]=on; }
 void lcd_page(u8 row) {

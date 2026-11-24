@@ -129,6 +129,8 @@ u8 hardware_key(void) {
     return 0;
 }
 
+#ifndef RADIO_NATIVE_AUDIO
+/* The normal-boot image keeps the established DAC route, so this is RAM-test only. */
 static void audio_write(u8 reg,u8 value) {
     u16 timeout=2000;
     ATDAT=value; ATADR=reg|0xC0;
@@ -142,11 +144,20 @@ void hardware_audio(void) {
     X8(0x7890)=0xFE; X8(0x7891)=0x11; X8(0x7892)=0xE8;
     X8(0x7893)=0xFF; X8(0x7894)=0x0D; X8(0x7895)=0x10;
     audio_write(2,0); audio_write(0,1);
-    audio_write(5,6); audio_write(4,0); audio_write(3,0);
+    audio_write(5,6); audio_write(4,0xFF); audio_write(3,0x7F);
     /* The speaker stays disabled until the requested tuner channel settles. */
 }
+#endif
 void hardware_amplifier(u8 enabled) {
     X8(0x7809)&=0xF7; P3DIR&=0xDF;
     /* V115 speaker enable is active high, confirmed by a live RAM comparison. */
     if(enabled) P3|=0x20; else P3&=0xDF;
+}
+void hardware_volume(u8 level) {
+    /* Stock bank 9 UI curve, applied through the native DAC's gain encoding.
+       7893 is gain; 7890 bit 0 is mute. Preserve every bias/power control bit. */
+    static const __code u8 gain[]={0,129,35,131,5,69,133,7,71,103,167,9,73,137,11,75,139,13,77,141,173,15,47,79,111,143,175,113,145,177,147,179,181};
+    if(level>32) level=0;
+    X8(0x7893)=gain[level];
+    if(level) X8(0x7890)&=0xFE; else X8(0x7890)|=1;
 }

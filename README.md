@@ -4,7 +4,7 @@ Expanded tuning, signal history, configurable scanning, saved preferences, and
 screen sleep for the Retekess V115. This project patches a verified stock v1.4 image and
 assembles the added 8051 code directly in Python.
 
-**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.2.3 (experimental)**
+**Patched release: 1.5-RC6 · Source-built radio: OPEN-0.3.0 (experimental; installed: OPEN-0.2.6)**
 
 Linux development tools · 2 MiB SPI flash. The two images have separate build
 and installation commands; OPEN is a radio application with fewer features.
@@ -42,33 +42,100 @@ is pending. Instruction tests use instrumented board services.
 
 ## Autonomous source-built radio
 
-**OPEN-0.2.3** adds an autonomous main loop to the working OPEN-0.1 RAM prototype.
+**OPEN-0.3.0** adds a graphical radio screen, a settings menu and the stock MP3
+player to the OPEN-0.2.6 radio described below. It is built and
+simulator-qualified but not yet installed. Previews rendered from the firmware's
+simulated LCD output are in `build/previews/open-0.3.0/`.
+
+- **Screen:** a status bar (band, five signal bars at 6 dB C/N steps, STEREO
+  from AKC6955 register 23 bit 7 or forced MONO, speaker and volume), the
+  frequency in 12x32 seven-segment digits, a tuning dial (FM 87.5–108 MHz, MW
+  and SW over their tuning range), an SNR/LOCK/BASS or message line, and an
+  inverted key-hint bar. The pixel loops (seven-segment glyphs, bars, dial) are
+  8051 assembly in `app.c`; SDCC's large-model C for them did not fit the 6 KiB
+  overlay. The screen deliberately stays in the overlay: the stock trampoline
+  reloads the caller's bank on every return, so drawing from a bank would load
+  2 KiB of flash twice per redraw.
+
+- **Boot:** the stock task loop now runs unchanged, except that its boot-time
+  mode choice (bank 11, `0x1ACE`) always selects the radio task. The 0.2 startup
+  shim and dispatcher patch are removed; the stock radio task loads the OPEN
+  overlay and calls it in place of its own.
+- **MENU** opens **SETTINGS**: MP3 PLAYER, MP3 EQ, BAND, VOLUME, FM FILTER
+  (200/150/100/50 kHz), STEREO (auto/mono), BASS BOOST, DE-EMPHASIS (50/75 µs),
+  SCREEN OFF, STANDBY, POWER OFF. Up/down select (with repeat), digits 1–9 jump
+  to items 1–9 and 0 to the tenth (POWER OFF is reached by scrolling), Play
+  toggles or runs an item, Vol+/Vol− change its value, MENU exits. FM options are
+  written to AKC6955 register 7 immediately.
+- **MP3 EQ** selects the stock player's preset: NORMAL, POP, ROCK, JAZZ,
+  CLASSIC, COUNTRY, BASS. The stock EQ is the DAC's hardware BASS/EQ filter
+  (DAC registers 12–15): `music_eq` (bank 15, `0x1CFF`) loads 96 coefficient bytes
+  per preset from the mask-ROM table at `0xB988`, or 108 bytes at `0xB76C` for
+  BASS. The preset is XDATA `0x3B6A`, saved as setting `0x0D`. OPEN reads it on
+  every radio entry, so a change made in the player's own menu shows up. When
+  entering the player, OPEN passes the menu choice to the player's `eq_set`
+  (bank 9, `0x1A54`), which saves it, and the player applies it at each playback
+  start. The filter only processes decoded playback. Stock plays FM with the DAC
+  disabled, over the analogue AUX path, so the EQ cannot change radio audio. For
+  the radio, the tuner's own BASS BOOST and DE-EMPHASIS are the tone controls.
+- **MODE** (or MENU → MP3 PLAYER) restores the board registers OPEN changed and
+  enters the stock music task (SD or USB, MP3/WMA/WAV) using the same calls as
+  the stock MODE handler: device test `0x2111`, select `0C:1FD1` (USB preferred),
+  media check `0x119C`, then `00:1DC9`/`04:1E81`. Without media the radio stays
+  and shows `NO SD CARD OR USB`. Inside the player, keys behave as stock; when the
+  stock firmware returns to the radio task, OPEN resumes its band, per-band
+  frequencies, volume, mute and FM options from RAM.
+- **POWER OFF** hands task `0x13` to the stock power-off path. POWER still
+  toggles standby.
+- **Layout:** the menu runs from empty stock bank `0x2C`, while context save,
+  restore, resume and the music handoff run from bank `0x2D`, both through the
+  stock banked-call trampoline (`0x0133`/`0x0100`). The zero padding of the
+  RAM-resident common code holds the menu and system bank statics (`0x16F0`,
+  `0x1700`), the overlay's statics and locals (`0x1730`–`0x17AF`) and the radio
+  state (`0x17B0`). The overlay may use internal RAM only up to `0x09`; the banks
+  use `0x0A`–`0x0F`, and the build rejects anything more. The stock PC/USB mass-storage overlay (task 4) used
+  to start at `0x1E800`, where the 6 KiB radio overlay overlaps it; it is copied
+  unchanged to banks `0x2E`–`0x30` and its single loader repointed.
+
+Not yet confirmed on hardware: menu keys and drawing load bank `0x2C` from SPI
+flash while the radio's own peripheral setup is active. The stock loader
+CRC-checks each block and resets through the watchdog on failure, so a problem
+here shows up as a reboot when MENU or MODE is pressed, not as a write.
+
+**OPEN-0.2.6** is the autonomous source-built radio, developed from the OPEN-0.1
+RAM prototype.
 The image retains the established bootstrap and initial clock/DAC setup, then
 starts the C radio regardless of the previous task or inserted memory card.
 The loader copies all three 2 KiB blocks of the radio program. The startup
 POWER gesture is consumed before normal key handling begins.
 Its own Timer1 polls the keypad and runs the radio at 20 ms intervals; a
 512 ms watchdog recovers a stalled loop. No host tick calls are needed after
-normal startup. The radio program occupies about **5.6 KiB** of the existing
+normal startup. The radio program occupies about **5.7 KiB** of the existing
 6 KiB overlay. The timer follows the existing clock divider so audio keeps
 its startup clock configuration; the normal-boot build also retains the
-board’s established DAC route. OPEN-0.2.3 corrects the active-high speaker
-enable: the amplifier stays off during startup, retuning, and standby, and
-turns on after the requested tuner channel settles.
+board’s established DAC route. OPEN-0.2.6 uses the stock 0–32 volume curve and the native DAC gain encoding
+at `0x7893`. The codec control register `0x7890` keeps its power/bias bits.
+Level 0 and Play mute switch off the amplifier and mute the tuner; retuning
+and standby retain the chosen level. The stock tuner output pre-gain is retained. The amplifier stays off
+during startup and retuning, and enables after the requested channel settles
+when volume is nonzero and playback is unmuted. Volume changes between
+nonzero levels write only DAC gain: they leave amplifier enable and tuner mute
+untouched. The tuner input level stays fixed at its stock `0x8C` setting.
 
 **POWER** enters standby: tuner off, amplifier muted, display and backlight off.
 Press **POWER** again to resume the same frequency, band, volume, and mute
 setting. The CPU keeps polling in standby; this is not deep power-off.
-**MENU** still cancels entry or sleeps only the display, with any key waking it.
-Cold startup currently selects FM 95.300 MHz at volume 3. Settings survive
+In OPEN-0.2.6, **MENU** cancels entry or sleeps only the display, with any key waking it
+(in 0.3.0 it opens the settings menu; SCREEN OFF there sleeps the display).
+Cold startup currently selects FM 95.300 MHz at volume 1. Settings survive
 standby in RAM, but OPEN does not yet save them across battery removal.
 
 The source-built radio does not include RC6 scanning, graphs, presets,
 recording, or USB media playback. Existing saved settings and station lists
 are retained in flash for restoring RC6. All other keys follow the prototype
-table below, except that POWER controls standby in OPEN-0.2.3. POWER is a
-separate GPIO input; MENU is on the second ADC ladder. REC and MODE currently
-have no action. DEL uses the stock ladder code and passes simulated editing
+table below, except that POWER controls standby in OPEN-0.2.6. POWER is a
+separate GPIO input; MENU is on the second ADC ladder. In OPEN-0.2.6, REC and
+MODE have no action; in 0.3.0, MODE enters the stock MP3 player and REC is ignored. DEL uses the stock ladder code and passes simulated editing
 tests, but physical DEL presses have not registered on the test radio.
 
 Build and qualify a candidate with SDCC and uCsim installed:
@@ -95,26 +162,73 @@ After a fresh matching double-read backup, audit and prepare the update:
 ```sh
 make radio-image-verify BASELINE=local/radio.bin
 python3 flash_radio.py --baseline local/radio.bin \
-  --image build/v115-open-0.2.3.bin --session local/open-plan
+  --image build/v115-open-0.3.0.bin --session local/open-plan
 ```
 
 To install, use a new session directory and add `--write`. The writer accepts
-verified stock, RC6, reviewed OPEN-0.2 through 0.2.2, or this exact OPEN
-image. It uses the existing sector writer, erase/program/restore trial,
+verified stock, RC6, reviewed OPEN-0.2 through 0.2.6, or this exact OPEN
+image. Updating from the installed OPEN-0.2.6 rewrites 12 sectors. It uses the existing sector writer, erase/program/restore trial,
 rollback journal, and two complete installed-image readbacks. The first 8 KiB
 and current settings are protected.
-Boot-entry, 16 timer configurations, 55 application cases, four amplifier GPIO
+Boot-entry, 16 timer configurations, 188 application cases (88 for the menu,
+EQ, music handoff, resume and the graphical screen, every frame compared
+pixel-for-pixel with an independent Python model), four amplifier GPIO cases, 140 analogue-gain register
 cases, invalid-image guards, interrupted writes, oversized erases, and
-restoration to RC6 are checked before writing.
+restoration to RC6 are checked before writing. For 0.3.0 the audit also runs the
+patched boot selection (7 saved modes), the radio's return path to the stock
+task, the image's own system bank against the real drivers (register restore and
+6 handoff cases), and the USB-overlay relocation.
 
 After installation, disconnect USB and restart normally without holding 1.
-Check the OPEN-0.2.3 screen, direct frequency entry, standby/wake, and audio.
+Check the OPEN-0.2.6 screen, direct frequency entry, standby/wake, and audio.
 OPEN-0.2.2 has confirmed battery startup, frequency entry, headphone audio,
 and physical POWER standby/wake. A RAM comparison confirmed speaker station
-audio with the amplifier enable high. OPEN-0.2.3 applies that fix and starts
-at volume 3. Installation passed two matching full-image readbacks; normal-boot
-speaker audio is confirmed, while volume currently changes the display without
-changing loudness. Volume control is under investigation.
+audio with the amplifier enable high. OPEN-0.2.3 retained that fix, but its
+volume keys only updated the tuner register and did not change speaker loudness.
+OPEN-0.2.4 changed codec control bits as if they were gain, which changed
+loudness but introduced buzz/whine. It is superseded by OPEN-0.2.5, which
+uses the stock gain register and starts at volume 1.
+
+OPEN-0.2.5 had clean upward changes but briefly muted on clicks; downward
+changes could leave hiss/buzz. OPEN-0.2.6 removes amplifier cuts on nonzero
+volume changes and stops rewriting the tuner input level with the DAC level.
+The volume hardware check now sweeps all 33 gains up, down, and up again with
+audio muted, while checking the fixed tuner input level. It also checks
+zero-volume tuner mute, retuning, and standby/wake retention. Native timer
+batches and the full image/recovery model qualify each image before
+installation. Normal-boot listening acceptance remains necessary; register
+readback alone does not establish clean audio. OPEN-0.2.6 was installed with
+two matching full-image readbacks, preserving the boot prefix and saved
+settings; its normal-boot listening check is pending.
+
+Qualify the volume driver and timer before auditing an installation image:
+
+```sh
+make radio-timer-build
+python3 preview_radio_timer.py --start-muted --batches 2
+python3 verify_radio_volume_hardware.py
+```
+
+The flash writer requires matching timer and volume hardware evidence. The
+volume check exercises the compiled application's key handling and reads back
+all 33 stock DAC gain settings in 97 up/down/up samples, plus the fixed tuner
+input level; it does not apply a host-side gain override.
+The optional listening comparison remains available:
+
+```sh
+make radio-volume-run
+```
+
+This runs [`preview_radio_volume.py`](preview_radio_volume.py) in the established
+loader RAM allocation. It starts **muted at VOL 1**; press **Play** to listen,
+and **POWER** to stop. It mutes after 60 seconds without key input and ends
+after fifteen minutes. Exit switches off the display, speaker, tuner, and DAC.
+Each gain change checks the DAC gain and codec control readback; level zero,
+mute, tuning, standby, and application errors keep the speaker disabled.
+The local report is `build/radio-volume-preview.json`. This test does not
+write flash. Its tick rate is paced by USB, so controls are slower than normal
+boot. It does not qualify volume behavior in normal boot or replace the
+native-timer hardware test required by the flash writer.
 
 To restore RC6, first make a new matching double-read backup of the installed
 OPEN image, build RC6 with `make build`, then use:
@@ -188,8 +302,8 @@ spacing register is set to 25 kHz: live measurements with the original
 Instruction tests execute the compiled application with simulated board
 services, checking exact screen pixels, frequency boundaries and overflow,
 debouncing, mute/sleep, stale status, timeouts, and loader context preservation.
-There are 48 application cases, three cases executing the real GPIO
-initialization, two POWER GPIO cases, four amplifier GPIO cases, and a DAC
+There are 92 application cases, three cases executing the real GPIO
+initialization, two POWER GPIO cases, four amplifier GPIO cases, 140 analogue-gain cases, and a DAC
 startup context/timeout check. The GPIO tests cover clearing loader-enabled
 key pull-ups while preserving other pins; the LCD test
 checks that an absent SPI completion flag returns an error within its limit.
@@ -197,7 +311,7 @@ Live USB tests have verified FM/MW/SW channel readback. The display, physical
 frequency entry, controls, and headphone station audio have been confirmed on
 the radio. Speaker station audio was confirmed by a live GPIO comparison.
 Presets, scanning, persistent settings, recording, USB playback, and autonomous
-startup are outside this prototype; the OPEN-0.2.3 image above adds autonomous
+startup are outside this prototype; the OPEN-0.2.6 image above adds autonomous
 startup.
 The RC6 features and controls below apply to the separately installed patched
 firmware.
@@ -407,6 +521,39 @@ flash sessions, captures, old builds, and device-specific records are excluded
 from version control. `extract_images.py` can inspect image resources in a
 local firmware file without adding them to the repository.
 
+
+## Stock volume reconstruction
+
+[`stock_audio.py`](stock_audio.py) records the recovered volume curve and DAC
+register encodings. [`verify_stock_audio.py`](verify_stock_audio.py) executes
+350 cases of the original instructions, including zero, limits, per-task
+curves, and signed volume offsets.
+
+The stock user-volume routine is **bank 9, PC `0x1AF6`**, at decoded SPI
+`0x7AF6`. Radio task 3 selects its 33-byte lookup table at SPI `0x7B66`:
+
+```text
+0, 10, 13, 16, 18, 20, 22, 24, 26, 27, 29, 30, 32, 34, 36, 38, 40,
+42, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 58, 59, 60
+```
+
+It adds the byte offset at XDATA `0x3B6E`, forces UI volume zero to DAC zero,
+treats wrapped values at or above 128 as zero, and caps the result at 65.
+The final `LCALL 0x20C3` queues that requested volume at XDATA `0x21A2`;
+it does not immediately change the hardware. Common routine `0x04F7` calls
+`0x20C6` on timer ticks to process the fade. `0x20C9` restores the requested
+level during analogue fade-in. This also explains why an isolated call to
+the volume setter produced no register changes in earlier loader tests.
+
+A muted run of that native sequence at **every DAC target from 0 through 65**
+showed the gain encoding written to **`0x7893`**. **`0x7890` remained `0xFE`**,
+with bit 0 set for zero volume. OPEN-0.2.6 uses the resulting settled gain
+values while preserving the other codec control bits. Its application
+remains source-built and calls no stock application or ROM audio functions.
+The SPI wrapper was reconstructed from instructions; the internal ROM fade
+implementation was observed through its register effects, not recovered as C.
+The related [vendor SDK volume wrapper](https://github.com/Edragon/buildwin/blob/master/AX2227_BTBOXSDK_V110_20141010/APP_LLP/user/user_setting.c)
+corroborates the lookup/offset/clamp/DAC-call structure.
 
 ## AKC register research
 
